@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # db_shell_bench - Database Benchmark Tool
-# Supports PostgreSQL, OpenGauss and compatible databases
+# Supports PostgreSQL, OpenGauss, GaussDB
 #
 
 set -e
@@ -40,7 +40,7 @@ Options:
     -d DB       Database name (default: postgres)
     -U USER     Database user (default: postgres)
     -W PASS     Database password
-    -t TYPE     Database type: postgres, opengauss (default: postgres)
+    -t TYPE     Database type: postgres, opengauss, gaussdb (default: postgres)
     -P PREFIX   Table name prefix (default: dbbench)
     -s SCALE    Scaling factor for initialization (default: 1)
     -c CLIENTS  Number of concurrent clients (default: 1)
@@ -51,11 +51,10 @@ Examples:
     # PostgreSQL
     $0 -h localhost -p 5432 -U postgres init -s 10
     $0 -h localhost -p 5432 -U postgres -c 4 -n 100 benchmark
-    $0 -h localhost -p 5432 -U postgres -c 4 -T 60 benchmark
 
-    # OpenGauss
-    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W Enmotech@123 init -s 1
-    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W Enmotech@123 -c 4 -T 60 benchmark
+    # OpenGauss / GaussDB
+    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' init -s 1
+    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -c 4 -T 60 benchmark
 EOF
     exit 1
 }
@@ -78,23 +77,29 @@ url_encode() {
     printf '%s' "$str" | sed 's/@/%40/g; s/:/%3A/g; s/\//%2F/g; s/#/%23/g; s/\?/%3F/g; s/&/%26/g; s/=/%3D/g; s/ /%20/g'
 }
 
-# Get database client command
-get_db_client() {
+# Select database client: opengauss/gaussdb prefer gsql, fallback to psql
+DB_CLIENT=""
+detect_client() {
     case $DB_TYPE in
-        postgres|opengauss)
-            echo "psql"
+        postgres)
+            DB_CLIENT="psql"
+            ;;
+        opengauss|gaussdb)
+            # Prefer gsql, fallback to psql
+            if command -v gsql &> /dev/null; then
+                DB_CLIENT="gsql"
+            elif command -v psql &> /dev/null; then
+                DB_CLIENT="psql"
+            else
+                log_error "Neither gsql nor psql found. Please install database client tools."
+                exit 1
+            fi
             ;;
         *)
             log_error "Unsupported database type: $DB_TYPE"
             exit 1
             ;;
     esac
-}
-
-# Build connection options
-get_conn_opts() {
-    local opts="-h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"
-    echo "$opts"
 }
 
 # Build connection string with password
@@ -107,25 +112,30 @@ get_conn_str() {
     fi
 }
 
+# Build connection options (no password)
+get_conn_opts() {
+    echo "-h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"
+}
+
 # Execute SQL
 db_exec() {
     local sql="$1"
-    local client=$(get_db_client)
 
     if [ -n "$DB_PASS" ]; then
-        $client "$(get_conn_str)" -t -c "$sql" 2>/dev/null
+        $DB_CLIENT "$(get_conn_str)" -t -c "$sql" 2>/dev/null
     else
-        $client $(get_conn_opts) -t -c "$sql" 2>/dev/null
+        $DB_CLIENT $(get_conn_opts) -t -c "$sql" 2>/dev/null
     fi
 }
 
 # Check database client availability
 check_client() {
-    local client=$(get_db_client)
-    if ! command -v $client &> /dev/null; then
-        log_error "$client not found. Please install database client tools."
+    detect_client
+    if ! command -v $DB_CLIENT &> /dev/null; then
+        log_error "$DB_CLIENT not found. Please install database client tools."
         exit 1
     fi
+    log_info "Using client: $DB_CLIENT"
 }
 
 # Check database connection
@@ -134,7 +144,7 @@ check_connection() {
         log_error "Cannot connect to database. Check your connection parameters."
         exit 1
     fi
-    log_info "Database connection successful ($DB_TYPE)"
+    log_info "Database connection successful ($DB_TYPE via $DB_CLIENT)"
 }
 
 # Initialize test tables
@@ -183,7 +193,6 @@ init_database() {
 run_transaction() {
     local scale=$1
     local prefix=$2
-    local client=$(get_db_client)
 
     local aid=$((RANDOM % (scale * 100000) + 1))
     local bid=$((RANDOM % scale + 1))
@@ -191,7 +200,7 @@ run_transaction() {
     local delta=$(((RANDOM % 10000) - 5000))
 
     if [ -n "$DB_PASS" ]; then
-        $client "$(get_conn_str)" -q -t > /dev/null 2>&1 << EOF
+        $DB_CLIENT "$(get_conn_str)" -q -t > /dev/null 2>&1 << EOF
 BEGIN;
 UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
 SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
@@ -201,7 +210,7 @@ INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, 
 COMMIT;
 EOF
     else
-        $client $(get_conn_opts) -q -t > /dev/null 2>&1 << EOF
+        $DB_CLIENT $(get_conn_opts) -q -t > /dev/null 2>&1 << EOF
 BEGIN;
 UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
 SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
@@ -275,11 +284,42 @@ run_benchmark_multi() {
     local tmp_dir=$(mktemp -d)
     local pids=()
 
+    # Export connection info for sub-processes
+    local export_client="$DB_CLIENT"
+    local export_pass="$DB_PASS"
+    local export_conn_opts="$(get_conn_opts)"
+    local export_conn_str="$(get_conn_str)"
+
     for c in $(seq 1 $clients); do
         (
             local count=0
             for i in $(seq 1 $txns); do
-                run_transaction $scale $TABLE_PREFIX
+                local aid=$((RANDOM % (scale * 100000) + 1))
+                local bid=$((RANDOM % scale + 1))
+                local tid=$((RANDOM % (scale * 10) + 1))
+                local delta=$(((RANDOM % 10000) - 5000))
+
+                if [ -n "$export_pass" ]; then
+                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 << EOF
+BEGIN;
+UPDATE ${TABLE_PREFIX}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
+SELECT abalance FROM ${TABLE_PREFIX}_accounts WHERE aid = $aid;
+UPDATE ${TABLE_PREFIX}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
+UPDATE ${TABLE_PREFIX}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
+INSERT INTO ${TABLE_PREFIX}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
+COMMIT;
+EOF
+                else
+                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 << EOF
+BEGIN;
+UPDATE ${TABLE_PREFIX}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
+SELECT abalance FROM ${TABLE_PREFIX}_accounts WHERE aid = $aid;
+UPDATE ${TABLE_PREFIX}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
+UPDATE ${TABLE_PREFIX}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
+INSERT INTO ${TABLE_PREFIX}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
+COMMIT;
+EOF
+                fi
                 count=$((count + 1))
                 echo $count > "$tmp_dir/txn_$c"
             done
@@ -287,10 +327,9 @@ run_benchmark_multi() {
         pids+=($!)
     done
 
-    # Print progress every second while clients are running
+    # Print progress every second
     local last_report=$((start_sec))
     while true; do
-        # Check if all clients finished
         local all_done=true
         for pid in "${pids[@]}"; do
             if kill -0 $pid 2>/dev/null; then
@@ -345,7 +384,6 @@ run_benchmark_time() {
     local clients=$2
     local duration_secs=$3
     local prefix=$TABLE_PREFIX
-    local client=$(get_db_client)
 
     log_info "Running benchmark: $clients concurrent clients for $duration_secs seconds"
 
@@ -353,6 +391,12 @@ run_benchmark_time() {
     local end_time=$((start_time + duration_secs))
     local tmp_dir=$(mktemp -d)
     local pids=()
+
+    # Export connection info for sub-processes
+    local export_client="$DB_CLIENT"
+    local export_pass="$DB_PASS"
+    local export_conn_opts="$(get_conn_opts)"
+    local export_conn_str="$(get_conn_str)"
 
     for c in $(seq 1 $clients); do
         (
@@ -363,8 +407,8 @@ run_benchmark_time() {
                 local tid=$((RANDOM % (scale * 10) + 1))
                 local delta=$(((RANDOM % 10000) - 5000))
 
-                if [ -n "$DB_PASS" ]; then
-                    $client "$(get_conn_str)" -q -t > /dev/null 2>&1 << EOF
+                if [ -n "$export_pass" ]; then
+                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 << EOF
 BEGIN;
 UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
 SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
@@ -374,7 +418,7 @@ INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, 
 COMMIT;
 EOF
                 else
-                    $client $(get_conn_opts) -q -t > /dev/null 2>&1 << EOF
+                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 << EOF
 BEGIN;
 UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
 SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
@@ -475,6 +519,7 @@ echo "=========================================="
 echo "   db_shell_bench - Database Benchmark"
 echo "=========================================="
 echo "Database Type: $DB_TYPE"
+echo "Client:        $DB_CLIENT"
 echo "Host: $DB_HOST"
 echo "Port: $DB_PORT"
 echo "Database: $DB_NAME"
