@@ -50,7 +50,8 @@ Options:
 Examples:
     # PostgreSQL
     $0 -h localhost -p 5432 -U postgres init -s 10
-    $0 -h localhost -p 5432 -U postgres -W mypass -c 4 -n 100 benchmark
+    $0 -h localhost -p 5432 -U postgres -c 4 -n 100 benchmark
+    $0 -h localhost -p 5432 -U postgres -c 4 -T 60 benchmark
 
     # OpenGauss
     $0 -t opengauss -h localhost -p 5433 -U gaussdb -W Enmotech@123 init -s 1
@@ -92,12 +93,11 @@ get_db_client() {
 
 # Build connection options
 get_conn_opts() {
-    local client=$(get_db_client)
     local opts="-h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"
     echo "$opts"
 }
 
-# Build connection string with password (for password auth)
+# Build connection string with password
 get_conn_str() {
     if [ -n "$DB_PASS" ]; then
         local encoded_pass=$(url_encode "$DB_PASS")
@@ -113,10 +113,8 @@ db_exec() {
     local client=$(get_db_client)
 
     if [ -n "$DB_PASS" ]; then
-        # Use connection string with password
         $client "$(get_conn_str)" -t -c "$sql" 2>/dev/null
     else
-        # Use standard connection options
         $client $(get_conn_opts) -t -c "$sql" 2>/dev/null
     fi
 }
@@ -152,10 +150,8 @@ init_database() {
     log_info "  - ${TABLE_PREFIX}_branches: $BRANCH_ROWS rows"
     log_info "  - ${TABLE_PREFIX}_tellers:  $TELLER_ROWS rows"
 
-    # Drop existing tables
     db_exec "DROP TABLE IF EXISTS ${TABLE_PREFIX}_accounts, ${TABLE_PREFIX}_branches, ${TABLE_PREFIX}_tellers, ${TABLE_PREFIX}_history CASCADE;"
 
-    # Create tables
     db_exec "CREATE TABLE ${TABLE_PREFIX}_branches (bid INT PRIMARY KEY, bbalance INT, filler CHAR(88));"
     db_exec "CREATE TABLE ${TABLE_PREFIX}_tellers (tid INT PRIMARY KEY, bid INT, tbalance INT, filler CHAR(84));"
     db_exec "CREATE TABLE ${TABLE_PREFIX}_accounts (aid INT PRIMARY KEY, bid INT, abalance INT, filler CHAR(84));"
@@ -163,19 +159,16 @@ init_database() {
 
     log_info "Inserting data using generate_series..."
 
-    # Insert data
     db_exec "INSERT INTO ${TABLE_PREFIX}_branches SELECT s, 0, '' FROM generate_series(1, $BRANCH_ROWS) AS s;"
     db_exec "INSERT INTO ${TABLE_PREFIX}_tellers SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series(1, $TELLER_ROWS) AS s;"
 
     log_info "  Generating $ACCOUNT_ROWS account records..."
     db_exec "INSERT INTO ${TABLE_PREFIX}_accounts SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series(1, $ACCOUNT_ROWS) AS s;"
 
-    # Create indexes
     log_info "Creating indexes..."
     db_exec "CREATE INDEX idx_${TABLE_PREFIX}_accounts_bid ON ${TABLE_PREFIX}_accounts(bid);"
     db_exec "CREATE INDEX idx_${TABLE_PREFIX}_tellers_bid ON ${TABLE_PREFIX}_tellers(bid);"
 
-    # Vacuum analyze
     log_info "Running VACUUM ANALYZE..."
     db_exec "VACUUM ANALYZE ${TABLE_PREFIX}_branches;"
     db_exec "VACUUM ANALYZE ${TABLE_PREFIX}_tellers;"
@@ -197,7 +190,6 @@ run_transaction() {
     local tid=$((RANDOM % (scale * 10) + 1))
     local delta=$(((RANDOM % 10000) - 5000))
 
-    # Run transaction
     if [ -n "$DB_PASS" ]; then
         $client "$(get_conn_str)" -q -t > /dev/null 2>&1 << EOF
 BEGIN;
@@ -221,7 +213,15 @@ EOF
     fi
 }
 
-# Run benchmark with single client
+# Print progress line
+print_progress() {
+    local elapsed=$1
+    local total_done=$2
+    local tps=$3
+    printf "\r  [%3ds] txns: %d, tps: %s" "$elapsed" "$total_done" "$tps"
+}
+
+# Run benchmark with single client (transaction count mode)
 run_benchmark_single() {
     local scale=$1
     local txns=$2
@@ -229,9 +229,21 @@ run_benchmark_single() {
     log_info "Running benchmark: $txns transactions with 1 client"
 
     local start_time=$(date +%s.%N)
+    local start_sec=$(date +%s)
+    local count=0
+    local last_report=$((start_sec))
 
     for i in $(seq 1 $txns); do
         run_transaction $scale $TABLE_PREFIX
+        count=$((count + 1))
+
+        local now=$(date +%s)
+        if [ $((now - last_report)) -ge 1 ]; then
+            local elapsed=$((now - start_sec))
+            local tps=$(echo "scale=0; $count / $elapsed" | bc)
+            print_progress $elapsed $count $tps
+            last_report=$now
+        fi
     done
 
     local end_time=$(date +%s.%N)
@@ -239,16 +251,18 @@ run_benchmark_single() {
     local tps=$(echo "scale=2; $txns / $duration" | bc)
 
     echo ""
+    echo ""
     log_info "Benchmark Results:"
     echo "============================================"
     echo "  Database:            $DB_TYPE"
+    echo "  Clients:             1"
     echo "  Transactions:        $txns"
     echo "  Duration:            ${duration}s"
     echo "  TPS (transactions/s): ${tps}"
     echo "============================================"
 }
 
-# Run benchmark with multiple concurrent clients
+# Run benchmark with multiple concurrent clients (transaction count mode)
 run_benchmark_multi() {
     local scale=$1
     local txns=$2
@@ -257,19 +271,52 @@ run_benchmark_multi() {
     log_info "Running benchmark: $txns transactions per client, $clients concurrent clients"
 
     local start_time=$(date +%s.%N)
+    local start_sec=$(date +%s)
+    local tmp_dir=$(mktemp -d)
     local pids=()
 
     for c in $(seq 1 $clients); do
         (
+            local count=0
             for i in $(seq 1 $txns); do
                 run_transaction $scale $TABLE_PREFIX
+                count=$((count + 1))
+                echo $count > "$tmp_dir/txn_$c"
             done
         ) &
         pids+=($!)
     done
 
-    for pid in "${pids[@]}"; do
-        wait $pid
+    # Print progress every second while clients are running
+    local last_report=$((start_sec))
+    while true; do
+        # Check if all clients finished
+        local all_done=true
+        for pid in "${pids[@]}"; do
+            if kill -0 $pid 2>/dev/null; then
+                all_done=false
+                break
+            fi
+        done
+
+        local now=$(date +%s)
+        if [ $((now - last_report)) -ge 1 ] || [ "$all_done" = true ]; then
+            local total_done=0
+            for c in $(seq 1 $clients); do
+                local c_count=$(cat "$tmp_dir/txn_$c" 2>/dev/null || echo 0)
+                total_done=$((total_done + c_count))
+            done
+            local elapsed=$((now - start_sec))
+            local tps=$(echo "scale=0; $total_done / $elapsed" | bc)
+            print_progress $elapsed $total_done $tps
+            last_report=$now
+        fi
+
+        if [ "$all_done" = true ]; then
+            break
+        fi
+
+        sleep 0.2
     done
 
     local end_time=$(date +%s.%N)
@@ -277,6 +324,9 @@ run_benchmark_multi() {
     local total_txns=$((txns * clients))
     local tps=$(echo "scale=2; $total_txns / $duration" | bc)
 
+    rm -rf "$tmp_dir"
+
+    echo ""
     echo ""
     log_info "Benchmark Results:"
     echo "============================================"
@@ -289,7 +339,7 @@ run_benchmark_multi() {
     echo "============================================"
 }
 
-# Run benchmark with multiple concurrent clients for specified duration
+# Run benchmark with multiple concurrent clients (time-based mode)
 run_benchmark_time() {
     local scale=$1
     local clients=$2
@@ -301,8 +351,8 @@ run_benchmark_time() {
 
     local start_time=$(date +%s)
     local end_time=$((start_time + duration_secs))
-    local pids=()
     local tmp_dir=$(mktemp -d)
+    local pids=()
 
     for c in $(seq 1 $clients); do
         (
@@ -335,16 +385,36 @@ COMMIT;
 EOF
                 fi
                 count=$((count + 1))
+                echo $count > "$tmp_dir/txn_$c"
             done
-            echo $count > "$tmp_dir/txn_$c"
         ) &
         pids+=($!)
     done
 
+    # Print progress every second
+    local last_report=$((start_time))
+    while [ $(date +%s) -lt $end_time ]; do
+        local now=$(date +%s)
+        if [ $((now - last_report)) -ge 1 ]; then
+            local total_done=0
+            for c in $(seq 1 $clients); do
+                local c_count=$(cat "$tmp_dir/txn_$c" 2>/dev/null || echo 0)
+                total_done=$((total_done + c_count))
+            done
+            local elapsed=$((now - start_time))
+            local tps=$(echo "scale=0; $total_done / $elapsed" | bc)
+            print_progress $elapsed $total_done $tps
+            last_report=$now
+        fi
+        sleep 0.2
+    done
+
+    # Wait for all clients to finish
     for pid in "${pids[@]}"; do
         wait $pid
     done
 
+    # Final count
     local total_txns=0
     for c in $(seq 1 $clients); do
         local count=$(cat "$tmp_dir/txn_$c")
@@ -356,6 +426,7 @@ EOF
     local actual_duration=$(echo "$(date +%s) - $start_time" | bc)
     local tps=$(echo "scale=2; $total_txns / $actual_duration" | bc)
 
+    echo ""
     echo ""
     log_info "Benchmark Results:"
     echo "============================================"
