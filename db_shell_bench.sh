@@ -117,7 +117,7 @@ get_conn_opts() {
     echo "-h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"
 }
 
-# Execute SQL
+# Execute SQL (with output)
 db_exec() {
     local sql="$1"
 
@@ -125,6 +125,17 @@ db_exec() {
         $DB_CLIENT "$(get_conn_str)" -t -c "$sql" 2>/dev/null
     else
         $DB_CLIENT $(get_conn_opts) -t -c "$sql" 2>/dev/null
+    fi
+}
+
+# Execute SQL (quiet, suppress command feedback)
+db_exec_quiet() {
+    local sql="$1"
+
+    if [ -n "$DB_PASS" ]; then
+        $DB_CLIENT "$(get_conn_str)" -q -c "$sql" 2>/dev/null
+    else
+        $DB_CLIENT $(get_conn_opts) -q -c "$sql" 2>/dev/null
     fi
 }
 
@@ -154,35 +165,82 @@ init_database() {
     local ACCOUNT_ROWS=$((INIT_SCALE * 100000))
     local BRANCH_ROWS=$INIT_SCALE
     local TELLER_ROWS=$((INIT_SCALE * 10))
+    local BATCH_SIZE=100000
 
     log_info "Creating tables..."
     log_info "  - ${TABLE_PREFIX}_accounts: $ACCOUNT_ROWS rows"
     log_info "  - ${TABLE_PREFIX}_branches: $BRANCH_ROWS rows"
     log_info "  - ${TABLE_PREFIX}_tellers:  $TELLER_ROWS rows"
 
-    db_exec "DROP TABLE IF EXISTS ${TABLE_PREFIX}_accounts, ${TABLE_PREFIX}_branches, ${TABLE_PREFIX}_tellers, ${TABLE_PREFIX}_history CASCADE;"
+    db_exec_quiet "DROP TABLE IF EXISTS ${TABLE_PREFIX}_accounts, ${TABLE_PREFIX}_branches, ${TABLE_PREFIX}_tellers, ${TABLE_PREFIX}_history CASCADE;"
 
-    db_exec "CREATE TABLE ${TABLE_PREFIX}_branches (bid INT PRIMARY KEY, bbalance INT, filler CHAR(88));"
-    db_exec "CREATE TABLE ${TABLE_PREFIX}_tellers (tid INT PRIMARY KEY, bid INT, tbalance INT, filler CHAR(84));"
-    db_exec "CREATE TABLE ${TABLE_PREFIX}_accounts (aid INT PRIMARY KEY, bid INT, abalance INT, filler CHAR(84));"
-    db_exec "CREATE TABLE ${TABLE_PREFIX}_history (tid INT, bid INT, aid INT, delta INT, mtime TIMESTAMP, filler CHAR(22));"
+    db_exec_quiet "CREATE TABLE ${TABLE_PREFIX}_branches (bid INT PRIMARY KEY, bbalance INT, filler CHAR(88));"
+    db_exec_quiet "CREATE TABLE ${TABLE_PREFIX}_tellers (tid INT PRIMARY KEY, bid INT, tbalance INT, filler CHAR(84));"
+    db_exec_quiet "CREATE TABLE ${TABLE_PREFIX}_accounts (aid INT PRIMARY KEY, bid INT, abalance INT, filler CHAR(84));"
+    db_exec_quiet "CREATE TABLE ${TABLE_PREFIX}_history (tid INT, bid INT, aid INT, delta INT, mtime TIMESTAMP, filler CHAR(22));"
 
-    log_info "Inserting data using generate_series..."
+    # Insert branches and tellers (small data, single batch)
+    log_info "Inserting branches ($BRANCH_ROWS rows)..."
+    local t_start=$(date +%s.%N)
+    db_exec_quiet "INSERT INTO ${TABLE_PREFIX}_branches SELECT s, 0, '' FROM generate_series(1, $BRANCH_ROWS) AS s;"
+    local t_end=$(date +%s.%N)
+    local t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  done, ${t_dur}s"
 
-    db_exec "INSERT INTO ${TABLE_PREFIX}_branches SELECT s, 0, '' FROM generate_series(1, $BRANCH_ROWS) AS s;"
-    db_exec "INSERT INTO ${TABLE_PREFIX}_tellers SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series(1, $TELLER_ROWS) AS s;"
+    log_info "Inserting tellers ($TELLER_ROWS rows)..."
+    t_start=$(date +%s.%N)
+    db_exec_quiet "INSERT INTO ${TABLE_PREFIX}_tellers SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series(1, $TELLER_ROWS) AS s;"
+    t_end=$(date +%s.%N)
+    t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  done, ${t_dur}s"
 
-    log_info "  Generating $ACCOUNT_ROWS account records..."
-    db_exec "INSERT INTO ${TABLE_PREFIX}_accounts SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series(1, $ACCOUNT_ROWS) AS s;"
+    # Insert accounts in batches with progress
+    local total_batches=$((ACCOUNT_ROWS / BATCH_SIZE))
+    log_info "Inserting accounts ($ACCOUNT_ROWS rows, $total_batches batches of $BATCH_SIZE)..."
 
+    t_start=$(date +%s.%N)
+    local done_rows=0
+    for batch in $(seq 1 $total_batches); do
+        local batch_start=$(( (batch - 1) * BATCH_SIZE + 1 ))
+        local batch_end=$(( batch * BATCH_SIZE ))
+
+        db_exec_quiet "INSERT INTO ${TABLE_PREFIX}_accounts SELECT s, ((s-1) % $BRANCH_ROWS + 1), 0, '' FROM generate_series($batch_start, $batch_end) AS s;"
+
+        done_rows=$((done_rows + BATCH_SIZE))
+        local now=$(date +%s.%N)
+        local elapsed=$(echo "$now - $t_start" | bc)
+        local rows_per_sec=$(echo "scale=1; $done_rows / $elapsed" | bc)
+        local remaining=$(echo "scale=1; ($ACCOUNT_ROWS - $done_rows) / $rows_per_sec" | bc)
+        echo "  batch $batch/$total_batches: $done_rows/$ACCOUNT_ROWS rows, ${elapsed}s elapsed, ~${remaining}s remaining, ${rows_per_sec} rows/s"
+    done
+
+    t_end=$(date +%s.%N)
+    t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  accounts done, total ${t_dur}s"
+
+    # Create indexes with timing
     log_info "Creating indexes..."
-    db_exec "CREATE INDEX idx_${TABLE_PREFIX}_accounts_bid ON ${TABLE_PREFIX}_accounts(bid);"
-    db_exec "CREATE INDEX idx_${TABLE_PREFIX}_tellers_bid ON ${TABLE_PREFIX}_tellers(bid);"
+    t_start=$(date +%s.%N)
+    db_exec_quiet "CREATE INDEX idx_${TABLE_PREFIX}_accounts_bid ON ${TABLE_PREFIX}_accounts(bid);"
+    t_end=$(date +%s.%N)
+    t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  idx_accounts_bid done, ${t_dur}s"
 
+    t_start=$(date +%s.%N)
+    db_exec_quiet "CREATE INDEX idx_${TABLE_PREFIX}_tellers_bid ON ${TABLE_PREFIX}_tellers(bid);"
+    t_end=$(date +%s.%N)
+    t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  idx_tellers_bid done, ${t_dur}s"
+
+    # Vacuum analyze with timing
     log_info "Running VACUUM ANALYZE..."
-    db_exec "VACUUM ANALYZE ${TABLE_PREFIX}_branches;"
-    db_exec "VACUUM ANALYZE ${TABLE_PREFIX}_tellers;"
-    db_exec "VACUUM ANALYZE ${TABLE_PREFIX}_accounts;"
+    t_start=$(date +%s.%N)
+    db_exec_quiet "VACUUM ANALYZE ${TABLE_PREFIX}_branches;"
+    db_exec_quiet "VACUUM ANALYZE ${TABLE_PREFIX}_tellers;"
+    db_exec_quiet "VACUUM ANALYZE ${TABLE_PREFIX}_accounts;"
+    t_end=$(date +%s.%N)
+    t_dur=$(echo "$t_end - $t_start" | bc)
+    echo "  vacuum analyze done, ${t_dur}s"
 
     log_info "Initialization complete!"
     log_info "Total data size:"
