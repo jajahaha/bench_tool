@@ -1,29 +1,33 @@
-# db_shell_bench - v1
+# db_shell_bench - v2
 
-PostgreSQL 基准测试工具，纯 shell 脚本实现。
+数据库基准测试工具，纯 shell 脚本实现。支持 PostgreSQL 和 OpenGauss。
 
 ## 快速开始
 
 ```bash
-# 初始化测试数据
-./db_shell_bench.sh -h 127.0.0.1 -p 5432 -U postgres -d postgres init -s 1
+# PostgreSQL
+./db_shell_bench.sh -h localhost -p 5432 -U postgres init -s 1
+./db_shell_bench.sh -h localhost -p 5432 -U postgres -c 4 -n 100 benchmark
 
-# 运行基准测试
-./db_shell_bench.sh -h 127.0.0.1 -p 5432 -U postgres -d postgres -c 4 -t 100 benchmark
+# OpenGauss (带密码)
+./db_shell_bench.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' init -s 1
+./db_shell_bench.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -c 4 -T 60 benchmark
 ```
 
 ## 参数说明
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| -t TYPE | 数据库类型 (postgres/opengauss) | postgres |
 | -h HOST | 数据库主机 | localhost |
 | -p PORT | 端口 | 5432 |
 | -d DB | 数据库 | postgres |
 | -U USER | 用户 | postgres |
+| -W PASS | 密码 | - |
 | -P PREFIX | 表前缀 | dbbench |
 | -s SCALE | 初始化缩放因子 | 1 |
 | -c CLIENTS | 并发数 | 1 |
-| -t TXNS | 事务数/客户端 | - |
+| -n TXNS | 事务数/客户端 | - |
 | -T SECS | 持续时间(秒) | - |
 
 ## 测试

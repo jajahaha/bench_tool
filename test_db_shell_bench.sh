@@ -11,6 +11,8 @@ DB_HOST="127.0.0.1"
 DB_PORT="5432"
 DB_NAME="postgres"
 DB_USER="lcj"
+DB_PASS=""
+DB_TYPE="postgres"
 TEST_PREFIX="testbench"
 
 # Colors for output
@@ -84,7 +86,7 @@ test_invalid_option() {
 test_connection() {
     log_test "Test 3: Database connection"
 
-    if $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P conn_test -t 1 benchmark 2>&1 | grep -q "connection successful"; then
+    if $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P conn_test -n 1 benchmark 2>&1 | grep -q "connection successful"; then
         log_pass "Database connection successful"
     else
         log_fail "Database connection failed"
@@ -142,7 +144,7 @@ test_init_scale5() {
 test_benchmark_no_init() {
     log_test "Test 6: Benchmark without initialization (should fail)"
 
-    if $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P nonexistent -t 1 benchmark 2>&1 | grep -q "Test tables not found"; then
+    if $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P nonexistent -n 1 benchmark 2>&1 | grep -q "Test tables not found"; then
         log_pass "Correctly rejected benchmark without init"
     else
         log_fail "Did not reject benchmark without init"
@@ -153,7 +155,7 @@ test_benchmark_no_init() {
 test_single_client_txn() {
     log_test "Test 7: Single client transaction-based benchmark"
 
-    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 1 -t 10 benchmark 2>&1)
+    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 1 -n 10 benchmark 2>&1)
 
     if echo "$output" | grep -q "TPS"; then
         log_pass "Single client benchmark completed with TPS result"
@@ -174,7 +176,7 @@ test_single_client_txn() {
 test_multi_client_txn() {
     log_test "Test 8: Multi-client transaction-based benchmark (4 clients)"
 
-    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 4 -t 20 benchmark 2>&1)
+    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 4 -n 20 benchmark 2>&1)
 
     if echo "$output" | grep -q "Clients:.*4" && echo "$output" | grep -q "TPS"; then
         log_pass "Multi-client benchmark completed"
@@ -225,7 +227,7 @@ test_missing_benchmark_params() {
 test_connection_display() {
     log_test "Test 11: Connection parameters display"
 
-    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -t 1 benchmark 2>&1)
+    local output=$($SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -n 1 benchmark 2>&1)
 
     if echo "$output" | grep -q "Host: $DB_HOST" && \
        echo "$output" | grep -q "Port: $DB_PORT" && \
@@ -245,7 +247,7 @@ test_transaction_correctness() {
     local initial_sum=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT sum(abalance) FROM ${TEST_PREFIX}_accounts;" | tr -d '[:space:]')
 
     # Run some transactions
-    $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 1 -t 5 benchmark > /dev/null 2>&1
+    $SCRIPT -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -P $TEST_PREFIX -c 1 -n 5 benchmark > /dev/null 2>&1
 
     # Get final balance sum (should be different since transactions add random deltas)
     local final_sum=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT sum(abalance) FROM ${TEST_PREFIX}_accounts;" | tr -d '[:space:]')
@@ -286,7 +288,7 @@ test_table_prefix() {
 test_invalid_host() {
     log_test "Test 14: Invalid host connection (should fail)"
 
-    if $SCRIPT -h invalid_host -p 9999 -U invalid -d invalid -P test -t 1 benchmark 2>&1 | grep -q "Cannot connect"; then
+    if $SCRIPT -h invalid_host -p 9999 -U invalid -d invalid -P test -n 1 benchmark 2>&1 | grep -q "Cannot connect"; then
         log_pass "Correctly handled invalid connection"
     else
         log_fail "Did not handle invalid connection properly"
