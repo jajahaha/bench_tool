@@ -222,12 +222,12 @@ EOF
     fi
 }
 
-# Print progress line
+# Print progress line (append, not overwrite)
 print_progress() {
     local elapsed=$1
     local total_done=$2
     local tps=$3
-    printf "\r  [%3ds] txns: %d, tps: %s" "$elapsed" "$total_done" "$tps"
+    echo "  [${elapsed}s] txns: ${total_done}, tps: ${tps}"
 }
 
 # Run benchmark with single client (transaction count mode)
@@ -247,7 +247,7 @@ run_benchmark_single() {
         count=$((count + 1))
 
         local now=$(date +%s)
-        if [ $((now - last_report)) -ge 1 ]; then
+        if [ $((now - last_report)) -ge 3 ]; then
             local elapsed=$((now - start_sec))
             local tps=$(echo "scale=0; $count / $elapsed" | bc)
             print_progress $elapsed $count $tps
@@ -259,7 +259,6 @@ run_benchmark_single() {
     local duration=$(echo "$end_time - $start_time" | bc)
     local tps=$(echo "scale=2; $txns / $duration" | bc)
 
-    echo ""
     echo ""
     log_info "Benchmark Results:"
     echo "============================================"
@@ -366,7 +365,6 @@ EOF
     rm -rf "$tmp_dir"
 
     echo ""
-    echo ""
     log_info "Benchmark Results:"
     echo "============================================"
     echo "  Database:            $DB_TYPE"
@@ -439,7 +437,7 @@ EOF
     local last_report=$((start_time))
     while [ $(date +%s) -lt $end_time ]; do
         local now=$(date +%s)
-        if [ $((now - last_report)) -ge 1 ]; then
+        if [ $((now - last_report)) -ge 3 ]; then
             local total_done=0
             for c in $(seq 1 $clients); do
                 local c_count=$(cat "$tmp_dir/txn_$c" 2>/dev/null || echo 0)
@@ -470,7 +468,6 @@ EOF
     local actual_duration=$(echo "$(date +%s) - $start_time" | bc)
     local tps=$(echo "scale=2; $total_txns / $actual_duration" | bc)
 
-    echo ""
     echo ""
     log_info "Benchmark Results:"
     echo "============================================"
