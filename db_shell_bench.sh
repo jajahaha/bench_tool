@@ -479,7 +479,33 @@ EOF
     echo "============================================"
 }
 
-# Parse arguments
+# Extract command word from arguments first, then parse options
+# This supports both: "init -s 10" and "-s 10 init"
+CMD=""
+for arg in "$@"; do
+    case $arg in
+        init|benchmark) CMD="$arg" ;;
+    esac
+done
+
+if [ -n "$CMD" ]; then
+    case $CMD in
+        init) MODE="init" ;;
+        benchmark) MODE="benchmark" ;;
+    esac
+fi
+
+# Rebuild positional args without the command word for getopts
+NEW_ARGS=()
+for arg in "$@"; do
+    case $arg in
+        init|benchmark) ;;
+        *) NEW_ARGS+=("$arg") ;;
+    esac
+done
+set -- "${NEW_ARGS[@]}"
+OPTIND=1
+
 while getopts "h:p:d:U:W:t:P:s:c:n:T:" opt; do
     case $opt in
         h) DB_HOST="$OPTARG" ;;
@@ -496,17 +522,6 @@ while getopts "h:p:d:U:W:t:P:s:c:n:T:" opt; do
         *) usage ;;
     esac
 done
-
-shift $((OPTIND-1))
-
-# Determine mode
-if [ $# -gt 0 ]; then
-    case $1 in
-        init) MODE="init" ;;
-        benchmark) MODE="benchmark" ;;
-        *) usage ;;
-    esac
-fi
 
 # Main execution
 check_client
