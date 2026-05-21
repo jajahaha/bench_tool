@@ -76,12 +76,12 @@ MIT
 
 ## Undo 测试
 
-OpenGauss UStore "snapshot too old" 复现测试，用于验证 undo 日志回收机制：
+OpenGauss UStore undo 回收测试，复现 MVCC 快照静默损坏问题：
 
 ```bash
 # 在 OpenGauss/GaussDB 上运行
 ./undo/test_snapshot_too_old.sh -h localhost -p 5433 -U gaussdb -W 'Pass@123'
-./undo/test_snapshot_too_old.sh -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 100
+./undo/test_snapshot_too_old.sh -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -w 3900 -R 200 -C 8
 ```
 
-仅适用于 OpenGauss/GaussDB，需要 `enable_ustore=on`。PostgreSQL 无 undo 机制，不会触发此错误。
+仅适用于 OpenGauss/GaussDB，需要 `enable_ustore=on`。测试发现：undo 记录被回收后，查询**不报错**但静默返回当前版本而非快照版本的数据（MVCC 语义被破坏）。

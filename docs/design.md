@@ -84,43 +84,54 @@ COMMIT;
 
 ## Undo 测试（undo 目录）
 
-OpenGauss UStore "snapshot too old" 复现测试工具。
+OpenGauss UStore undo 回收导致的 MVCC 快照损坏复现测试。
 
 ### 文件
 
-- `undo/test_snapshot_too_old.sh` — UStore snapshot too old 测试用例
+- `undo/test_snapshot_too_old.sh` — UStore undo 回收测试用例
+
+### 发现的问题
+
+测试发现 OpenGauss 6.0 UStore 的 undo 回收机制存在比 "snapshot too old" 更严重的问题：
+
+1. **"snapshot too old" 报错**（Oracle 等数据库的正确行为）— undo 记录被回收后，查询报错，用户知道数据不可用
+2. **MVCC 快照静默损坏**（OpenGauss 实际行为）— undo 记录被回收后，查询**不报错**，但静默返回当前版本而非快照版本的数据，用户以为数据正确但其实已经错了
 
 ### 触发原理
 
-OpenGauss UStore 引擎使用 undo 日志实现 MVCC（类似 Oracle）。当 undo 空间被回收后，长事务的快照版本无法重构，报 "snapshot too old" 错误。
+1. 创建 ustore 表（`WITH (storage_type = ustore)`），插入 val=0 的数据
+2. Session 1 开启长事务，查询 `SELECT id, val FROM table WHERE id <= 5`，记录快照时的 val=0
+3. Session 2+ 大量并发更新（`val = val + 1`），产生大量 undo 记录
+4. undo 回收线程回收旧 undo 记录后，Session 1 的快照链被截断
+5. Session 1 再次查询，返回 val≠0（最近可用版本而非快照版本），**不报错**
 
-触发条件：
-1. 创建 ustore 表（`WITH (storage_type = ustore)`）
-2. Session 1 开启长事务，查询全表建立快照
-3. Session 2+ 大量并发更新同一张表，产生大量 undo 记录
-4. undo 空间达到上限后强制回收，Session 1 快照无法重构
-5. 报错 "snapshot too old"
+### 检测方法
+
+比较长事务两次查询的 val 值：
+- 第一次查询（快照建立时）：val=0 ✓
+- 第二次查询（更新后）：val≠0 → 快照损坏
+- 若报 "snapshot too old" 错误 → 也算检测到问题
 
 ### 关键参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| -r ROWS | 初始行数（宽行，增加 undo 记录大小） | 5000 |
-| -R ROUNDS | 更新轮次 | 50 |
-| -C CLIENTS | 并发更新客户端数 | 4 |
+| -r ROWS | 初始行数 | 10000 |
+| -w WIDTH | 数据列宽度（字节）| 3900 |
+| -R ROUNDS | 更新轮次 | 100 |
+| -C CLIENTS | 并发更新客户端数 | 8 |
 
-脚本自动尝试通过 `ALTER SYSTEM` 将 `undo_space_limit_size` 降低到最小值（800MB），以便更容易触发错误。
+脚本自动通过 `ALTER SYSTEM` 将 `undo_space_limit_size` 降低到最小值（800MB）。
 
 ### 长事务策略
 
 使用 `pg_sleep` 保持长事务活跃：
-- `BEGIN; SELECT count(*) FROM table; SELECT pg_sleep(N); SELECT count(*) FROM table; COMMIT;`
+- `BEGIN; SELECT id, val FROM table WHERE id <= 5; SELECT pg_sleep(N); SELECT id, val FROM table WHERE id <= 5; COMMIT;`
 - 在 sleep 期间并发更新产生 undo 压力
-- sleep 结束后再次查询，检测是否报 "snapshot too old"
+- sleep 结束后再次查询，比较两次 val 是否一致
 
 ### 注意事项
 
-- 仅适用于 OpenGauss/GaussDB（PostgreSQL 无 undo 机制，不会触发此错误）
-- 需要 `enable_ustore=on`（postmaster 级别，需重启生效）
-- `undo_space_limit_size` 最小值为 800MB（SIGHUP 级别，可通过 ALTER SYSTEM 修改）
-- 触发 "snapshot too old" 需要 undo 空间压力超过 undo_space_limit_size
+- 仅适用于 OpenGauss/GaussDB（PostgreSQL 无 undo 机制）
+- 需要 `enable_ustore=on`
+- 检测的是 MVCC 快照静默损坏，不仅限于 "snapshot too old" 报错
