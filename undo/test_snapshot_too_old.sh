@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# test_snapshot_too_old.sh - OpenGauss UStore "snapshot too old" 测试用例
+# test_snapshot_too_old.sh - OpenGauss/GaussDB UStore undo 回收测试
 #
 # 触发原理：
 #   1. 创建 ustore 表（使用 undo 日志的存储引擎）
@@ -11,15 +11,18 @@
 #      - 报 "snapshot too old" 错误 → 快照版本无法重构（正确行为）
 #      - 静默返回当前值 → MVCC 数据损坏（更严重问题）
 #
-# 仅适用于 OpenGauss / GaussDB（PostgreSQL 无 undo 机制不会触发此问题）
+# 适用于 OpenGauss / GaussDB（PostgreSQL 无 undo 机制不会触发此问题）
+# 自动选择客户端：gaussdb/opengauss 优先 gsql，回退 psql
 #
 
 # Default configuration
+DB_TYPE="gaussdb"
 DB_HOST="localhost"
-DB_PORT="5433"
+DB_PORT="8000"
 DB_NAME="postgres"
-DB_USER="gaussdb"
+DB_USER="root"
 DB_PASS=""
+DB_CLIENT=""
 TABLE_NAME="snap_too_old_test"
 ROW_COUNT=10000
 DATA_WIDTH=3900
@@ -39,22 +42,31 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-OpenGauss UStore "snapshot too old" reproduction test.
+OpenGauss/GaussDB UStore undo recycling test.
+Auto-selects client: gaussdb/opengauss prefer gsql, fallback psql.
 
 Options:
+    -t TYPE     Database type: gaussdb/opengauss (default: gaussdb)
     -h HOST     Database host (default: localhost)
-    -p PORT     Database port (default: 5433)
+    -p PORT     Database port (default: 8000 for gaussdb, 5433 for opengauss)
     -d DB       Database name (default: postgres)
-    -U USER     Database user (default: gaussdb)
+    -U USER     Database user (default: root for gaussdb, gaussdb for opengauss)
     -W PASS     Database password
     -r ROWS     Number of initial rows (default: 10000)
-    -w WIDTH    Data column width in bytes (default: 3900, wider = more undo per row)
+    -w WIDTH    Data column width in bytes (default: 3900)
     -R ROUNDS   Number of update rounds (default: 100)
     -C CLIENTS  Concurrent update clients (default: 8)
 
 Examples:
-    $0 -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
-    $0 -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -w 3900 -R 200 -C 8
+    # GaussDB (auto gsql)
+    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
+    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200
+
+    # OpenGauss (auto gsql or psql)
+    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
+
+    # OpenGauss with psql fallback
+    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -r 10000 -R 100 -C 8
 EOF
     exit 1
 }
@@ -75,50 +87,84 @@ log_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
-# URL encode password
+# URL encode password (for psql connection string)
 url_encode() {
     local str="$1"
     printf '%s' "$str" | sed 's/@/%40/g; s/:/%3A/g; s/\//%2F/g; s/#/%23/g; s/\?/%3F/g; s/&/%26/g; s/=/%3D/g; s/ /%20/g'
 }
 
-# Build connection string
-get_conn_str() {
-    if [ -n "$DB_PASS" ]; then
-        local encoded_pass=$(url_encode "$DB_PASS")
-        echo "postgresql://${DB_USER}:${encoded_pass}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+# Auto-select client: gaussdb/opengauss prefer gsql, fallback psql
+detect_client() {
+    case $DB_TYPE in
+        gaussdb|opengauss)
+            if command -v gsql &> /dev/null; then
+                DB_CLIENT="gsql"
+            elif command -v psql &> /dev/null; then
+                DB_CLIENT="psql"
+            else
+                log_error "Neither gsql nor psql found. Install database client tools."
+                exit 1
+            fi
+            ;;
+        *)
+            log_error "Unsupported database type: $DB_TYPE (use gaussdb or opengauss)"
+            exit 1
+            ;;
+    esac
+}
+
+# Set default port/user based on DB_TYPE
+set_defaults() {
+    case $DB_TYPE in
+        gaussdb)
+            DB_PORT=${DB_PORT:-8000}
+            DB_USER=${DB_USER:-root}
+            ;;
+        opengauss)
+            DB_PORT=${DB_PORT:-5433}
+            DB_USER=${DB_USER:-gaussdb}
+            ;;
+    esac
+}
+
+# Build full connection command (gsql uses -W for password, psql uses connection string)
+build_conn_cmd() {
+    local extra_opts="$1"
+    if [ "$DB_CLIENT" = "gsql" ]; then
+        if [ -n "$DB_PASS" ]; then
+            echo "gsql -h $DB_HOST -p $DB_PORT -U $DB_USER -W '$DB_PASS' -d $DB_NAME $extra_opts"
+        else
+            echo "gsql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra_opts"
+        fi
     else
-        echo ""
+        # psql: password via URL-encoded connection string
+        if [ -n "$DB_PASS" ]; then
+            local encoded_pass=$(url_encode "$DB_PASS")
+            echo "psql postgresql://${DB_USER}:${encoded_pass}@${DB_HOST}:${DB_PORT}/${DB_NAME} $extra_opts"
+        else
+            echo "psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra_opts"
+        fi
     fi
 }
 
-# Get psql connection options (no password)
-get_conn_opts() {
-    echo "-h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"
-}
-
-# Execute SQL (quiet, suppress output)
+# Execute SQL (quiet, suppress output noise)
 db_exec() {
     local sql="$1"
-    if [ -n "$DB_PASS" ]; then
-        psql "$(get_conn_str)" -q -c "$sql" 2>&1 | grep -v "^ALTER SYSTEM\|^pg_reload_conf\|^SET\|^DROP TABLE\|^CREATE TABLE\|^INSERT 0\|^NOTICE:" || true
-    else
-        psql $(get_conn_opts) -q -c "$sql" 2>&1 | grep -v "^ALTER SYSTEM\|^pg_reload_conf\|^SET\|^DROP TABLE\|^CREATE TABLE\|^INSERT 0\|^NOTICE:" || true
-    fi
+    local cmd=$(build_conn_cmd "-q -c \"$sql\"")
+    eval "$cmd" 2>&1 | grep -v "^ALTER SYSTEM\|^pg_reload_conf\|^SET\|^DROP TABLE\|^CREATE TABLE\|^INSERT 0\|^NOTICE:\|^gsql:" || true
 }
 
-# Execute SQL and return output (for result checking)
+# Execute SQL and return raw output
 db_query() {
     local sql="$1"
-    if [ -n "$DB_PASS" ]; then
-        psql "$(get_conn_str)" -t -c "$sql" 2>&1
-    else
-        psql $(get_conn_opts) -t -c "$sql" 2>&1
-    fi
+    local cmd=$(build_conn_cmd "-t -c \"$sql\"")
+    eval "$cmd" 2>&1
 }
 
 # Parse arguments
-while getopts "h:p:d:U:W:r:w:R:C:" opt; do
+while getopts "t:h:p:d:U:W:r:w:R:C:" opt; do
     case $opt in
+        t) DB_TYPE="$OPTARG" ;;
         h) DB_HOST="$OPTARG" ;;
         p) DB_PORT="$OPTARG" ;;
         d) DB_NAME="$OPTARG" ;;
@@ -132,6 +178,13 @@ while getopts "h:p:d:U:W:r:w:R:C:" opt; do
     esac
 done
 
+# Set type-specific defaults
+set_defaults
+
+# Detect client
+detect_client
+log_info "Using client: $DB_CLIENT"
+
 # Calculate sleep time
 SLEEP_SECONDS=$(( UPDATE_ROUNDS * 2 + 30 ))
 if [ "$SLEEP_SECONDS" -lt 120 ]; then
@@ -140,10 +193,11 @@ fi
 
 echo ""
 echo "============================================"
-echo "  UStore Snapshot Too Old Test"
+echo "  UStore Undo Recycling Test"
 echo "============================================"
-echo "Database:  $DB_HOST:$DB_PORT/$DB_NAME"
+echo "Database:  $DB_TYPE ($DB_HOST:$DB_PORT/$DB_NAME)"
 echo "User:      $DB_USER"
+echo "Client:    $DB_CLIENT"
 echo "Table:     $TABLE_NAME (ustore)"
 echo "Rows:      $ROW_COUNT"
 echo "Data width: ${DATA_WIDTH} bytes per row"
@@ -152,23 +206,14 @@ echo "Long txn sleep: ${SLEEP_SECONDS}s"
 echo "============================================"
 echo ""
 
-# Check psql
-if ! command -v psql &> /dev/null; then
-    log_error "psql not found"
-    exit 1
-fi
-
-CONN_STR="$(get_conn_str)"
-CONN_OPTS="$(get_conn_opts)"
-
-# Step 1: Check database type
+# Step 1: Check database version
 log_step "1/7: Checking database version"
 DB_VER=$(db_query "SELECT version();" | head -1)
 echo "  $DB_VER"
 
 if ! echo "$DB_VER" | grep -qi "opengauss\|gaussdb"; then
     log_warn "This test is designed for OpenGauss/GaussDB with UStore."
-    log_warn "PostgreSQL does not have undo mechanism and will NOT trigger this issue."
+    log_warn "PostgreSQL does not have undo mechanism."
     log_warn "Proceeding anyway for reference..."
 fi
 
@@ -240,11 +285,8 @@ SELECT id, val FROM $TABLE_NAME WHERE id <= ${CHECK_ROWS};
 COMMIT;
 SQL_EOF
 
-if [ -n "$DB_PASS" ]; then
-    psql "$CONN_STR" -f "$LONG_TXN_SQL" > "$LONG_TXN_OUT" 2>&1 &
-else
-    psql $CONN_OPTS -f "$LONG_TXN_SQL" > "$LONG_TXN_OUT" 2>&1 &
-fi
+LONG_TXN_CMD=$(build_conn_cmd "-f $LONG_TXN_SQL")
+eval "$LONG_TXN_CMD" > "$LONG_TXN_OUT" 2>&1 &
 LONG_TXN_PID=$!
 
 log_info "  Long transaction started (PID=$LONG_TXN_PID)"
@@ -253,15 +295,14 @@ sleep 3
 # Step 6: Heavy concurrent updates
 log_step "6/7: Running $UPDATE_ROUNDS rounds x $UPDATE_CLIENTS clients of heavy updates"
 
+UPDATE_SQL="UPDATE $TABLE_NAME SET val = val + 1, data = repeat('u', ${DATA_WIDTH}) WHERE id BETWEEN $start_id AND $end_id;"
+
 for round in $(seq 1 $UPDATE_ROUNDS); do
     for c in $(seq 1 $UPDATE_CLIENTS); do
         start_id=$(( (c-1) * (ROW_COUNT / UPDATE_CLIENTS) + 1 ))
         end_id=$(( c * (ROW_COUNT / UPDATE_CLIENTS) ))
-        if [ -n "$DB_PASS" ]; then
-            psql "$CONN_STR" -q -c "UPDATE $TABLE_NAME SET val = val + 1, data = repeat('u', ${DATA_WIDTH}) WHERE id BETWEEN $start_id AND $end_id;" 2>/dev/null &
-        else
-            psql $CONN_OPTS -q -c "UPDATE $TABLE_NAME SET val = val + 1, data = repeat('u', ${DATA_WIDTH}) WHERE id BETWEEN $start_id AND $end_id;" 2>/dev/null &
-        fi
+        UPDATE_CMD=$(build_conn_cmd "-q -c \"UPDATE $TABLE_NAME SET val = val + 1, data = repeat('u', ${DATA_WIDTH}) WHERE id BETWEEN $start_id AND $end_id;\"")
+        eval "$UPDATE_CMD" 2>/dev/null &
     done
     wait
 
@@ -291,9 +332,9 @@ done
 # Step 7: Check results and cleanup
 log_step "7/7: Checking results and cleanup"
 
-# Parse the long transaction output for val values
 SNAPSHOT_TOO_OLD=false
 SNAPSHOT_CORRUPT=false
+second_val=""
 
 if [ -f "$LONG_TXN_OUT" ]; then
     echo "  Long transaction output:"
@@ -306,8 +347,6 @@ if [ -f "$LONG_TXN_OUT" ]; then
     fi
 
     # Check for val mismatch (MVCC corruption)
-    # The second SELECT should return val=0 (snapshot value), not the current value
-    # Extract first val value from the second SELECT result (after pg_sleep)
     second_val=$(sed -n '/pg_sleep/,$ p' "$LONG_TXN_OUT" | grep -E '^\s+[0-9]+\s+\|\s+[0-9]+' | head -1 | awk -F'|' '{gsub(/[[:space:]]/, "", $2); print $2}')
 
     if [ -n "$second_val" ] && [ "$second_val" != "0" ]; then

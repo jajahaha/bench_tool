@@ -116,10 +116,17 @@ OpenGauss UStore undo 回收导致的 MVCC 快照损坏复现测试。
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| -t TYPE | 数据库类型（gaussdb/opengauss） | gaussdb |
 | -r ROWS | 初始行数 | 10000 |
 | -w WIDTH | 数据列宽度（字节）| 3900 |
 | -R ROUNDS | 更新轮次 | 100 |
 | -C CLIENTS | 并发更新客户端数 | 8 |
+
+### 客户端自动选择
+
+gaussdb/opengauss 自动检测客户端：
+- 有 gsql 时使用 gsql（gsql 用 -W 传递密码）
+- 否则使用 psql（psql 用 URL 编码连接字符串传递密码）
 
 脚本自动通过 `ALTER SYSTEM` 将 `undo_space_limit_size` 降低到最小值（800MB）。
 

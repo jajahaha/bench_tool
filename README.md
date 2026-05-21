@@ -76,12 +76,17 @@ MIT
 
 ## Undo 测试
 
-OpenGauss UStore undo 回收测试，复现 MVCC 快照静默损坏问题：
+OpenGauss/GaussDB UStore undo 回收测试，复现 MVCC 快照静默损坏问题：
 
 ```bash
-# 在 OpenGauss/GaussDB 上运行
-./undo/test_snapshot_too_old.sh -h localhost -p 5433 -U gaussdb -W 'Pass@123'
-./undo/test_snapshot_too_old.sh -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -w 3900 -R 200 -C 8
+# GaussDB（自动使用 gsql）
+./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
+
+# OpenGauss（自动使用 gsql 或回退 psql）
+./undo/test_snapshot_too_old.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
+
+# 更多参数加大 undo 压力
+./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -w 3900 -R 200 -C 8
 ```
 
-仅适用于 OpenGauss/GaussDB，需要 `enable_ustore=on`。测试发现：undo 记录被回收后，查询**不报错**但静默返回当前版本而非快照版本的数据（MVCC 语义被破坏）。
+适用于 OpenGauss/GaussDB，需要 `enable_ustore=on`。gaussdb/opengauss 自动检测客户端：有 gsql 用 gsql，否则回退 psql。测试发现 undo 记录被回收后，查询不报错但静默返回当前版本而非快照版本的数据（MVCC 语义被破坏）。
