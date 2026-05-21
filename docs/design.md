@@ -130,12 +130,20 @@ gaussdb/opengauss 自动检测客户端：
 
 脚本自动通过 `ALTER SYSTEM` 将 `undo_space_limit_size` 降低到最小值（800MB）。
 
-### 长事务策略
+### 测试策略
 
-使用 `pg_sleep` 保持长事务活跃：
-- `BEGIN; SELECT id, val FROM table WHERE id <= 5; SELECT pg_sleep(N); SELECT id, val FROM table WHERE id <= 5; COMMIT;`
-- 在 sleep 期间并发更新产生 undo 压力
-- sleep 结束后再次查询，比较两次 val 是否一致
+同时运行两种长事务：
+1. **游标模式**（主要）— DECLARE CURSOR + pg_sleep + FETCH，在 GaussDB 上触发 "snapshot too old" 报错
+2. **SELECT 模式**（回退）— SELECT + pg_sleep + SELECT，在 OpenGauss 上检测 val 静默损坏
+
+OpenGauss 6.0 的行为差异：
+- 游标 FETCH：返回 val=0（正确快照数据，MVCC 正常）
+- 普通 SELECT：返回 val≠0（静默返回当前值而非快照值，MVCC 损坏）
+- 两种方式均不报 "snapshot too old" 错误
+
+GaussDB 商业版预期行为：
+- 游标 FETCH 应触发 "snapshot too old" 报错（正确处理 undo 回收）
+- 不应静默返回错误数据
 
 ### 注意事项
 
