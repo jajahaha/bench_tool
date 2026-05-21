@@ -12,6 +12,7 @@
 - **阶段耗时** — 建索引、VACUUM ANALYZE 各阶段独立计时
 - **实时进度** — 基准测试每 3 秒追加一行进度（不再覆盖）
 - **灵活参数顺序** — 支持 `init -s 10` 和 `-s 10 init` 两种格式
+- **UStore snapshot too old 测试** — 新增 undo 目录，包含 OpenGauss UStore 引擎 "snapshot too old" 复现测试脚本
 
 ### 变更
 

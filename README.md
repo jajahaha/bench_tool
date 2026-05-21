@@ -73,3 +73,15 @@ init 命令分批插入数据，实时显示进度：
 ## 许可证
 
 MIT
+
+## Undo 测试
+
+OpenGauss UStore "snapshot too old" 复现测试，用于验证 undo 日志回收机制：
+
+```bash
+# 在 OpenGauss/GaussDB 上运行
+./undo/test_snapshot_too_old.sh -h localhost -p 5433 -U gaussdb -W 'Pass@123'
+./undo/test_snapshot_too_old.sh -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 100
+```
+
+仅适用于 OpenGauss/GaussDB，需要 `enable_ustore=on`。PostgreSQL 无 undo 机制，不会触发此错误。
