@@ -19,6 +19,7 @@ CLIENTS=1
 TRANSACTIONS=0
 DURATION=0
 MODE="benchmark"
+BENCH_MODE="tpcb"
 
 # Colors for output
 RED='\033[0;31m'
@@ -42,19 +43,23 @@ Options:
     -W PASS     Database password
     -t TYPE     Database type: postgres, opengauss, gaussdb (default: postgres)
     -P PREFIX   Table name prefix (default: dbbench)
+    -M BENCH    Benchmark mode: tpcb (light), heavy (default: tpcb)
     -s SCALE    Scaling factor for initialization (default: 1)
     -c CLIENTS  Number of concurrent clients (default: 1)
     -n TXNS     Number of transactions per client (default: 0)
     -T SECS     Duration in seconds for time-based test (default: 0)
 
 Examples:
-    # PostgreSQL
+    # PostgreSQL - TPC-B light mode
     $0 -h localhost -p 5432 -U postgres init -s 10
     $0 -h localhost -p 5432 -U postgres -c 4 -n 100 benchmark
 
+    # PostgreSQL - heavy mode (more complex queries per transaction)
+    $0 -h localhost -p 5432 -U postgres -M heavy -c 4 -T 60 benchmark
+
     # OpenGauss / GaussDB
     $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' init -s 1
-    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -c 4 -T 60 benchmark
+    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -M heavy -c 4 -T 60 benchmark
 EOF
     exit 1
 }
@@ -247,8 +252,8 @@ init_database() {
     db_exec "SELECT 'branches: ' || count(*) FROM ${TABLE_PREFIX}_branches; SELECT 'tellers: ' || count(*) FROM ${TABLE_PREFIX}_tellers; SELECT 'accounts: ' || count(*) FROM ${TABLE_PREFIX}_accounts;"
 }
 
-# Run single transaction - TPC-B like
-run_transaction() {
+# Build transaction SQL based on benchmark mode
+build_txn_sql() {
     local scale=$1
     local prefix=$2
 
@@ -257,26 +262,51 @@ run_transaction() {
     local tid=$((RANDOM % (scale * 10) + 1))
     local delta=$(((RANDOM % 10000) - 5000))
 
+    case $BENCH_MODE in
+        tpcb)
+            cat << SQL
+BEGIN;
+UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
+SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
+UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
+UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
+INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
+COMMIT;
+SQL
+            ;;
+        heavy)
+            cat << SQL
+BEGIN;
+SELECT abalance, bid FROM ${prefix}_accounts WHERE aid = $aid;
+SELECT bbalance FROM ${prefix}_branches WHERE bid = $bid;
+SELECT tbalance, bid FROM ${prefix}_tellers WHERE tid = $tid;
+SELECT abalance FROM ${prefix}_accounts WHERE bid = $bid ORDER BY aid LIMIT 10;
+SELECT avg(abalance) FROM ${prefix}_accounts WHERE bid = $bid;
+UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
+UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
+UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
+INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
+SELECT delta, mtime FROM ${prefix}_history WHERE aid = $aid ORDER BY mtime DESC LIMIT 10;
+COMMIT;
+SQL
+            ;;
+        *)
+            log_error "Unknown benchmark mode: $BENCH_MODE"
+            exit 1
+            ;;
+    esac
+}
+
+# Run single transaction
+run_transaction() {
+    local scale=$1
+    local prefix=$2
+    local sql=$(build_txn_sql $scale $prefix)
+
     if [ -n "$DB_PASS" ]; then
-        $DB_CLIENT "$(get_conn_str)" -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
-UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+        $DB_CLIENT "$(get_conn_str)" -q -t > /dev/null 2>&1 <<< "$sql"
     else
-        $DB_CLIENT $(get_conn_opts) -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
-UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+        $DB_CLIENT $(get_conn_opts) -q -t > /dev/null 2>&1 <<< "$sql"
     fi
 }
 
@@ -321,6 +351,7 @@ run_benchmark_single() {
     log_info "Benchmark Results:"
     echo "============================================"
     echo "  Database:            $DB_TYPE"
+    echo "  Bench Mode:          $BENCH_MODE"
     echo "  Clients:             1"
     echo "  Transactions:        $txns"
     echo "  Duration:            ${duration}s"
@@ -346,36 +377,17 @@ run_benchmark_multi() {
     local export_pass="$DB_PASS"
     local export_conn_opts="$(get_conn_opts)"
     local export_conn_str="$(get_conn_str)"
+    local export_bench_mode="$BENCH_MODE"
 
     for c in $(seq 1 $clients); do
         (
             local count=0
             for i in $(seq 1 $txns); do
-                local aid=$((RANDOM % (scale * 100000) + 1))
-                local bid=$((RANDOM % scale + 1))
-                local tid=$((RANDOM % (scale * 10) + 1))
-                local delta=$(((RANDOM % 10000) - 5000))
-
+                local sql=$(build_txn_sql $scale $TABLE_PREFIX)
                 if [ -n "$export_pass" ]; then
-                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${TABLE_PREFIX}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${TABLE_PREFIX}_accounts WHERE aid = $aid;
-UPDATE ${TABLE_PREFIX}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${TABLE_PREFIX}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${TABLE_PREFIX}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 <<< "$sql"
                 else
-                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${TABLE_PREFIX}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${TABLE_PREFIX}_accounts WHERE aid = $aid;
-UPDATE ${TABLE_PREFIX}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${TABLE_PREFIX}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${TABLE_PREFIX}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 <<< "$sql"
                 fi
                 count=$((count + 1))
                 echo $count > "$tmp_dir/txn_$c"
@@ -426,6 +438,7 @@ EOF
     log_info "Benchmark Results:"
     echo "============================================"
     echo "  Database:            $DB_TYPE"
+    echo "  Bench Mode:          $BENCH_MODE"
     echo "  Clients:             $clients"
     echo "  Transactions/client: $txns"
     echo "  Total transactions:  $total_txns"
@@ -453,36 +466,17 @@ run_benchmark_time() {
     local export_pass="$DB_PASS"
     local export_conn_opts="$(get_conn_opts)"
     local export_conn_str="$(get_conn_str)"
+    local export_bench_mode="$BENCH_MODE"
 
     for c in $(seq 1 $clients); do
         (
             local count=0
             while [ $(date +%s) -lt $end_time ]; do
-                local aid=$((RANDOM % (scale * 100000) + 1))
-                local bid=$((RANDOM % scale + 1))
-                local tid=$((RANDOM % (scale * 10) + 1))
-                local delta=$(((RANDOM % 10000) - 5000))
-
+                local sql=$(build_txn_sql $scale $prefix)
                 if [ -n "$export_pass" ]; then
-                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
-UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+                    $export_client "$export_conn_str" -q -t > /dev/null 2>&1 <<< "$sql"
                 else
-                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 << EOF
-BEGIN;
-UPDATE ${prefix}_accounts SET abalance = abalance + $delta WHERE aid = $aid;
-SELECT abalance FROM ${prefix}_accounts WHERE aid = $aid;
-UPDATE ${prefix}_tellers SET tbalance = tbalance + $delta WHERE tid = $tid;
-UPDATE ${prefix}_branches SET bbalance = bbalance + $delta WHERE bid = $bid;
-INSERT INTO ${prefix}_history (tid, bid, aid, delta, mtime) VALUES ($tid, $bid, $aid, $delta, CURRENT_TIMESTAMP);
-COMMIT;
-EOF
+                    $export_client $export_conn_opts -q -t > /dev/null 2>&1 <<< "$sql"
                 fi
                 count=$((count + 1))
                 echo $count > "$tmp_dir/txn_$c"
@@ -530,6 +524,7 @@ EOF
     log_info "Benchmark Results:"
     echo "============================================"
     echo "  Database:            $DB_TYPE"
+    echo "  Bench Mode:          $BENCH_MODE"
     echo "  Clients:             $clients"
     echo "  Duration:            ${actual_duration}s"
     echo "  Total transactions:  $total_txns"
@@ -564,7 +559,7 @@ done
 set -- "${NEW_ARGS[@]}"
 OPTIND=1
 
-while getopts "h:p:d:U:W:t:P:s:c:n:T:" opt; do
+while getopts "h:p:d:U:W:t:P:M:s:c:n:T:" opt; do
     case $opt in
         h) DB_HOST="$OPTARG" ;;
         p) DB_PORT="$OPTARG" ;;
@@ -573,6 +568,7 @@ while getopts "h:p:d:U:W:t:P:s:c:n:T:" opt; do
         W) DB_PASS="$OPTARG" ;;
         t) DB_TYPE="$OPTARG" ;;
         P) TABLE_PREFIX="$OPTARG" ;;
+        M) BENCH_MODE="$OPTARG" ;;
         s) INIT_SCALE="$OPTARG" ;;
         c) CLIENTS="$OPTARG" ;;
         n) TRANSACTIONS="$OPTARG" ;;
@@ -590,6 +586,7 @@ echo "   db_shell_bench - Database Benchmark"
 echo "=========================================="
 echo "Database Type: $DB_TYPE"
 echo "Client:        $DB_CLIENT"
+echo "Bench Mode:    $BENCH_MODE"
 echo "Host: $DB_HOST"
 echo "Port: $DB_PORT"
 echo "Database: $DB_NAME"
