@@ -84,7 +84,7 @@ COMMIT;
 
 ## Undo 测试（undo 目录）
 
-OpenGauss UStore undo 回收导致的 MVCC 快照损坏复现测试。
+OpenGauss/GaussDB UStore undo 回收导致的 MVCC 快照损坏复现测试。
 
 ### 文件
 
@@ -92,25 +92,24 @@ OpenGauss UStore undo 回收导致的 MVCC 快照损坏复现测试。
 
 ### 发现的问题
 
-测试发现 OpenGauss 6.0 UStore 的 undo 回收机制存在比 "snapshot too old" 更严重的问题：
+测试发现 OpenGauss 6.0 UStore 的 undo 回收机制存在比 "snapshot is stale" 更严重的问题：
 
-1. **"snapshot too old" 报错**（Oracle 等数据库的正确行为）— undo 记录被回收后，查询报错，用户知道数据不可用
-2. **MVCC 快照静默损坏**（OpenGauss 实际行为）— undo 记录被回收后，查询**不报错**，但静默返回当前版本而非快照版本的数据，用户以为数据正确但其实已经错了
+1. **"snapshot is stale" 报错**（Oracle/GaussDB 的正确行为）— undo 记录被强制回收后，游标报错，用户知道数据不可用
+2. **MVCC 快照静默损坏**（OpenGauss 实际行为）— undo 记录被回收后，普通 SELECT **不报错**，但静默返回当前版本而非快照版本的数据
 
 ### 触发原理
 
-1. 创建 ustore 表（`WITH (storage_type = ustore)`），插入 val=0 的数据
-2. Session 1 开启长事务，查询 `SELECT id, val FROM table WHERE id <= 5`，记录快照时的 val=0
-3. Session 2+ 大量并发更新（`val = val + 1`），产生大量 undo 记录
-4. undo 回收线程回收旧 undo 记录后，Session 1 的快照链被截断
-5. Session 1 再次查询，返回 val≠0（最近可用版本而非快照版本），**不报错**
+OpenGauss 的 undo 回收有两层机制：
+1. **正常回收**：尊重 oldest_xmin，只回收已提交且无人引用的 undo 记录
+2. **强制回收**：当 undo_used 超过 undo_threshold（undo_space_limit × 80%）时，**绕过 oldest_xmin** 强制回收
 
-### 检测方法
-
-比较长事务两次查询的 val 值：
-- 第一次查询（快照建立时）：val=0 ✓
-- 第二次查询（更新后）：val≠0 → 快照损坏
-- 若报 "snapshot too old" 错误 → 也算检测到问题
+触发步骤：
+1. 创建 ustore 表，插入 val=0 的数据
+2. Session 1 开启长事务游标，FETCH 获取快照数据
+3. N 个并发 "undo 压力事务"（BEGIN + UPDATE 全表 + pg_sleep + COMMIT），积累 undo_used 超过阈值
+4. 强制回收触发，绕过 oldest_xmin 回收游标快照需要的 undo 记录
+5. 游标继续 FETCH 时，undo 链已被截断 → 报 "snapshot is stale"（GaussDB）
+6. 或普通 SELECT 静默返回当前值而非快照值（OpenGauss bug）
 
 ### 关键参数
 
@@ -119,8 +118,10 @@ OpenGauss UStore undo 回收导致的 MVCC 快照损坏复现测试。
 | -t TYPE | 数据库类型（gaussdb/opengauss） | gaussdb |
 | -r ROWS | 初始行数 | 10000 |
 | -w WIDTH | 数据列宽度（字节）| 3900 |
-| -R ROUNDS | 更新轮次 | 100 |
-| -C CLIENTS | 并发更新客户端数 | 8 |
+| -R ROUNDS | 快速更新轮次 | 100 |
+| -C CLIENTS | 快速更新并发数 | 8 |
+| -P PRESSURE | undo 压力事务并发数 | 20 |
+| -S SLEEP | 压力事务 pg_sleep 秒数 | 5 |
 
 ### 客户端自动选择
 
@@ -128,25 +129,32 @@ gaussdb/opengauss 自动检测客户端：
 - 有 gsql 时使用 gsql（gsql 用 -W 传递密码）
 - 否则使用 psql（psql 用 URL 编码连接字符串传递密码）
 
-脚本自动通过 `ALTER SYSTEM` 将 `undo_space_limit_size` 降低到最小值（800MB）。
+脚本自动配置：
+- `ALTER SYSTEM SET undo_space_limit_size = 102400`（降低到 800MB，阈值 640MB）
+- 检查并启用 `undo_snapshot_stale_check = on`（控制 "snapshot is stale" 报错）
 
 ### 测试策略
 
-同时运行两种长事务：
-1. **游标模式**（主要）— DECLARE CURSOR + pg_sleep + FETCH，在 GaussDB 上触发 "snapshot too old" 报错
-2. **SELECT 模式**（回退）— SELECT + pg_sleep + SELECT，在 OpenGauss 上检测 val 静默损坏
+两层并发产生 undo 压力：
+1. **undo 压力事务**（主要）— 并发 N 个事务，每个做 BEGIN + UPDATE 全表 + pg_sleep(S) + COMMIT，积累 undo_used 超过阈值触发强制回收
+2. **快速分区更新**（辅助）— 并发分区 UPDATE 立即提交，持续产生 undo 回收需求
+
+同时运行两种长事务检测：
+1. **游标模式** — DECLARE CURSOR + pg_sleep + FETCH，触发 "snapshot is stale" 报错
+2. **SELECT 模式** — SELECT + pg_sleep + SELECT，检测 val 静默损坏
 
 OpenGauss 6.0 的行为差异：
-- 游标 FETCH：返回 val=0（正确快照数据，MVCC 正常）
+- 游标 FETCH：返回 val=0（正确快照数据）或报 "snapshot is stale"（undo 被强制回收）
 - 普通 SELECT：返回 val≠0（静默返回当前值而非快照值，MVCC 损坏）
-- 两种方式均不报 "snapshot too old" 错误
+- undo_snapshot_stale_check=on 时，游标路径应正确报错；但普通 SELECT 不走 stale check
 
 GaussDB 商业版预期行为：
-- 游标 FETCH 应触发 "snapshot too old" 报错（正确处理 undo 回收）
+- 游标 FETCH 应触发 "snapshot is stale" 报错
 - 不应静默返回错误数据
 
 ### 注意事项
 
 - 仅适用于 OpenGauss/GaussDB（PostgreSQL 无 undo 机制）
 - 需要 `enable_ustore=on`
-- 检测的是 MVCC 快照静默损坏，不仅限于 "snapshot too old" 报错
+- 检测的是 MVCC 快照静默损坏，不仅限于 "snapshot is stale" 报错
+- 错误信息搜索包含 "snapshot is stale" 和 "snapshot too old" 两种

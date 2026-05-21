@@ -2,12 +2,13 @@
 #
 # test_snapshot_too_old.sh - OpenGauss/GaussDB UStore undo 回收测试
 #
-# 复现 "snapshot too old" 报错：
+# 复现 "snapshot is stale" / "snapshot too old" 报错：
 #   1. 创建 ustore 表（undo 日志存储引擎）
 #   2. 长事务通过游标 FETCH 逐行获取数据
-#   3. 并发更新产生大量 undo 记录，undo 回收截断 undo 链
-#   4. 游标继续 FETCH 时报 "snapshot too old"（GaussDB）
-#   5. 或普通 SELECT 静默返回当前值而非快照值（OpenGauss）
+#   3. undo 压力事务并发更新全表 + pg_sleep 保持事务不提交，积累 undo
+#   4. undo_used 超过 undo_threshold → 强制回收绕过 oldest_xmin
+#   5. 游标 FETCH 时 undo 链已被截断 → 报 "snapshot is stale"
+#   6. 或普通 SELECT 静默返回当前值而非快照值（OpenGauss 6.0 bug）
 #
 # 适用于 GaussDB / OpenGauss（PostgreSQL 无 undo 机制）
 # 自动选择客户端：gaussdb/opengauss 优先 gsql，回退 psql
@@ -25,6 +26,8 @@ ROW_COUNT=10000
 DATA_WIDTH=3900
 UPDATE_ROUNDS=100
 UPDATE_CLIENTS=8
+PRESSURE_CLIENTS=20
+PRESSURE_SLEEP=5
 SLEEP_SECONDS=0
 
 RED='\033[0;31m'
@@ -37,10 +40,11 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-OpenGauss/GaussDB UStore "snapshot too old" reproduction test.
+OpenGauss/GaussDB UStore "snapshot is stale" reproduction test.
 
-Uses cursor FETCH to trigger "snapshot too old" error (GaussDB).
-Also runs a regular SELECT as fallback to detect silent MVCC corruption (OpenGauss).
+Strategy: concurrent "undo pressure" transactions (BEGIN + UPDATE + pg_sleep + COMMIT)
+accumulate undo past the threshold, triggering force recycling that bypasses oldest_xmin,
+reclaiming undo records needed by a cursor's snapshot → cursor FETCH raises error.
 
 Options:
     -t TYPE     Database type: gaussdb/opengauss (default: gaussdb)
@@ -52,12 +56,14 @@ Options:
     -r ROWS     Number of initial rows (default: 10000)
     -w WIDTH    Data column width in bytes (default: 3900)
     -R ROUNDS   Number of update rounds (default: 100)
-    -C CLIENTS  Concurrent update clients (default: 8)
+    -C CLIENTS  Concurrent update clients per round (default: 8)
+    -P PRESSURE Undo pressure transaction concurrency (default: 20)
+    -S SLEEP    Undo pressure transaction pg_sleep seconds (default: 5)
 
 Examples:
     $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
     $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
-    $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200 -C 8
+    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -r 50000 -R 200 -C 16 -P 30 -S 10
 EOF
     exit 1
 }
@@ -121,7 +127,7 @@ db_query() {
     eval "$(build_conn "-t -c \"$sql\"")" 2>&1
 }
 
-while getopts "t:h:p:d:U:W:r:w:R:C:" opt; do
+while getopts "t:h:p:d:U:W:r:w:R:C:P:S:" opt; do
     case $opt in
         t) DB_TYPE="$OPTARG" ;;
         h) DB_HOST="$OPTARG" ;;
@@ -133,6 +139,8 @@ while getopts "t:h:p:d:U:W:r:w:R:C:" opt; do
         w) DATA_WIDTH="$OPTARG" ;;
         R) UPDATE_ROUNDS="$OPTARG" ;;
         C) UPDATE_CLIENTS="$OPTARG" ;;
+        P) PRESSURE_CLIENTS="$OPTARG" ;;
+        S) PRESSURE_SLEEP="$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -153,7 +161,8 @@ echo "Client:    $DB_CLIENT"
 echo "Table:     $TABLE_NAME (ustore)"
 echo "Rows:      $ROW_COUNT, width: ${DATA_WIDTH} bytes"
 echo "Updates:   $UPDATE_ROUNDS rounds x $UPDATE_CLIENTS clients"
-echo "Sleep:     ${SLEEP_SECONDS}s"
+echo "Pressure:  $PRESSURE_CLIENTS clients x ${PRESSURE_SLEEP}s sleep"
+echo "Sleep:     ${SLEEP_SECONDS}s (long txn)"
 echo "============================================"
 echo ""
 
@@ -166,18 +175,34 @@ if ! echo "$DB_VER" | grep -qi "opengauss\|gaussdb"; then
     log_warn "This test requires OpenGauss/GaussDB with UStore."
 fi
 
-# Step 2: Check undo config
+# Step 2: Check undo config (including undo_snapshot_stale_check)
 log_step "2/7: Checking UStore and undo configuration"
 ENABLE_USTORE=$(db_query "SHOW enable_ustore;" | tr -d '[:space:]')
 UNDO_RETENTION=$(db_query "SHOW undo_retention_time;" | tr -d '[:space:]')
 UNDO_SPACE_NUM=$(db_query "SELECT setting FROM pg_settings WHERE name = 'undo_space_limit_size';" | tr -d '[:space:]')
 UNDO_SPACE_MB=$(( UNDO_SPACE_NUM * 8 / 1024 ))
+UNDO_THRESHOLD_MB=$(( UNDO_SPACE_MB * 80 / 100 ))
 
-echo "  enable_ustore:       $ENABLE_USTORE"
-echo "  undo_retention_time: $UNDO_RETENTION s"
-echo "  undo_space_limit:    ${UNDO_SPACE_NUM} x 8kB (${UNDO_SPACE_MB}MB)"
+# Check undo_snapshot_stale_check (controls "snapshot is stale" error)
+STALE_CHECK=$(db_query "SHOW undo_snapshot_stale_check;" 2>&1 | tr -d '[:space:]')
+
+echo "  enable_ustore:          $ENABLE_USTORE"
+echo "  undo_retention_time:    $UNDO_RETENTION s"
+echo "  undo_space_limit:       ${UNDO_SPACE_NUM} x 8kB (${UNDO_SPACE_MB}MB)"
+echo "  undo_threshold:         ~${UNDO_THRESHOLD_MB}MB (80%, force recycling trigger)"
+echo "  undo_snapshot_stale_check: ${STALE_CHECK}"
 
 [ "$ENABLE_USTORE" != "on" ] && { log_error "UStore not enabled."; exit 1; }
+
+# Enable undo_snapshot_stale_check if off
+if [ "$STALE_CHECK" != "on" ]; then
+    log_warn "undo_snapshot_stale_check is off, enabling it..."
+    db_exec "ALTER SYSTEM SET undo_snapshot_stale_check = on;" || true
+    db_exec "SELECT pg_reload_conf();" || true
+    sleep 1
+    STALE_CHECK=$(db_query "SHOW undo_snapshot_stale_check;" 2>&1 | tr -d '[:space:]')
+    echo "  undo_snapshot_stale_check: ${STALE_CHECK} (after change)"
+fi
 
 # Step 2b: Reduce undo limit
 log_step "2b/7: Reducing undo_space_limit_size to minimum (800MB)"
@@ -186,7 +211,9 @@ db_exec "SELECT pg_reload_conf();" || true
 sleep 1
 
 NEW_UNDO=$(db_query "SELECT setting FROM pg_settings WHERE name = 'undo_space_limit_size';" | tr -d '[:space:]')
+UNDO_THRESHOLD_MB=$(( NEW_UNDO * 8 / 1024 * 80 / 100 ))
 echo "  undo_space_limit: ${NEW_UNDO} x 8kB"
+echo "  undo_threshold:   ~${UNDO_THRESHOLD_MB}MB (force recycling trigger)"
 [ "$NEW_UNDO" = "102400" ] && log_info "  Set to 800MB" || log_warn "  Unchanged (${NEW_UNDO} x 8kB)"
 
 # Step 3: Create ustore table
@@ -210,12 +237,10 @@ log_step "5/7: Starting long transactions (cursor + select)"
 CUR_OUT="/tmp/cur_${TABLE_NAME}_$$.out"
 SEL_OUT="/tmp/sel_${TABLE_NAME}_$$.out"
 
-# --- Cursor-based long transaction (primary: triggers "snapshot too old") ---
+# --- Cursor-based long transaction (primary: triggers "snapshot is stale") ---
 CUR_SQL="/tmp/cur_${TABLE_NAME}_$$.sql"
-# Fetch rows in batches with delays, so undo recycler runs between fetches
-BATCH_SIZE=$(( ROW_COUNT / 20 ))  # 20 fetches to scan all rows
+BATCH_SIZE=$(( ROW_COUNT / 20 ))
 [ "$BATCH_SIZE" -lt 5 ] && BATCH_SIZE=5
-FETCH_COUNT=20
 
 cat > "$CUR_SQL" << SQL_EOF
 \set ON_ERROR_STOP off
@@ -267,50 +292,90 @@ SEL_PID=$!
 log_info "  Cursor txn PID=$CUR_PID, Select txn PID=$SEL_PID"
 sleep 3
 
-# Step 6: Heavy concurrent updates
-log_step "6/7: Running $UPDATE_ROUNDS rounds x $UPDATE_CLIENTS clients of updates"
+# Step 6: Run undo pressure + concurrent updates
+log_step "6/7: Running undo pressure transactions + concurrent updates"
 
-for round in $(seq 1 $UPDATE_ROUNDS); do
+# --- Undo pressure transactions: BEGIN + UPDATE all + pg_sleep + COMMIT ---
+# Each pressure transaction updates ALL rows with wide data, holds open via pg_sleep.
+# N concurrent such transactions accumulate N × ~39MB undo ≈ 780MB, exceeding 640MB threshold.
+PRESSURE_SQL="/tmp/pressure_${TABLE_NAME}_$$.sql"
+PRESSURE_PIDS=""
+
+cat > "$PRESSURE_SQL" << SQL_EOF
+\set ON_ERROR_STOP off
+BEGIN;
+UPDATE $TABLE_NAME SET val = val + 1, data = repeat('p', ${DATA_WIDTH});
+SELECT pg_sleep(${PRESSURE_SLEEP});
+COMMIT;
+SQL_EOF
+
+log_info "  Starting $PRESSURE_CLIENTS undo pressure transactions (pg_sleep ${PRESSURE_SLEEP}s)..."
+
+# Launch pressure transactions in waves until long transactions finish
+pressure_round=0
+while kill -0 $CUR_PID 2>/dev/null; do
+    pressure_round=$(( pressure_round + 1 ))
+    wave_pids=""
+    for i in $(seq 1 $PRESSURE_CLIENTS); do
+        eval "$(build_conn "-f $PRESSURE_SQL")" 2>/dev/null &
+        pid=$!
+        wave_pids="$wave_pids $pid"
+    done
+    PRESSURE_PIDS="$PRESSURE_PIDS $wave_pids"
+
+    # Also run quick partitioned updates during this wave
     for c in $(seq 1 $UPDATE_CLIENTS); do
         start_id=$(( (c-1) * (ROW_COUNT / UPDATE_CLIENTS) + 1 ))
         end_id=$(( c * (ROW_COUNT / UPDATE_CLIENTS) ))
         eval "$(build_conn "-q -c \"UPDATE $TABLE_NAME SET val = val + 1, data = repeat('u', ${DATA_WIDTH}) WHERE id BETWEEN $start_id AND $end_id;\"")" 2>/dev/null &
     done
-    wait
 
-    if [ $((round % 10)) -eq 0 ]; then
-        UNDO_USED=$(db_query "SELECT curr_used_undo_size FROM gs_stat_undo();" | tr -d '[:space:]')
-        log_info "  Round $round/$UPDATE_ROUNDS | undo: ${UNDO_USED} | $(date +%H:%M:%S)"
+    # Monitor undo usage
+    UNDO_USED=$(db_query "SELECT curr_used_undo_size FROM gs_stat_undo();" 2>/dev/null | tr -d '[:space:]')
+    UNDO_USED_MB=""
+    if [ -n "$UNDO_USED" ] && [ "$UNDO_USED" != "" ]; then
+        UNDO_USED_MB=$(( UNDO_USED * 8 / 1024 ))
+        log_info "  Pressure wave $pressure_round | undo_used: ${UNDO_USED} (${UNDO_USED_MB}MB) vs threshold ~${UNDO_THRESHOLD_MB}MB | $(date +%H:%M:%S)"
+        if [ "$UNDO_USED_MB" -ge "$UNDO_THRESHOLD_MB" ]; then
+            log_warn "  undo_used (${UNDO_USED_MB}MB) >= threshold (${UNDO_THRESHOLD_MB}MB) — force recycling should be active!"
+        fi
     fi
-done
 
-log_info "  Updates complete. Waiting for long transactions..."
-
-# Wait for both transactions
-WAIT_TIMEOUT=$(( SLEEP_SECONDS + 60 ))
-for pid in $CUR_PID $SEL_PID; do
-    elapsed=0
-    while kill -0 $pid 2>/dev/null; do
-        [ "$elapsed" -ge "$WAIT_TIMEOUT" ] && { kill $pid 2>/dev/null; wait $pid 2>/dev/null; break; }
-        sleep 5; elapsed=$(( elapsed + 5 ))
+    # Wait for this wave to finish before launching next
+    for pid in $wave_pids; do
+        wait $pid 2>/dev/null || true
     done
+    wait 2>/dev/null || true
+
+    # Brief pause between waves
+    sleep 1
 done
+
+log_info "  Long transactions finished. Waiting for remaining pressure transactions..."
+
+# Wait for remaining pressure transactions
+for pid in $PRESSURE_PIDS; do
+    kill -0 $pid 2>/dev/null && wait $pid 2>/dev/null || true
+done
+
+# Wait for remaining update processes
+wait 2>/dev/null || true
 
 # Step 7: Check results
 log_step "7/7: Checking results and cleanup"
 
-SNAPSHOT_TOO_OLD=false
+SNAPSHOT_STALE=false
 SNAPSHOT_CORRUPT=false
 second_val=""
 
-# --- Check cursor output for "snapshot too old" ---
+# --- Check cursor output for "snapshot is stale" / "snapshot too old" ---
 echo "  === Cursor transaction ==="
 if [ -f "$CUR_OUT" ]; then
-    # Check for error
-    if grep -qi "snapshot too old" "$CUR_OUT"; then
-        SNAPSHOT_TOO_OLD=true
-        log_error "  CURSOR: 'snapshot too old' triggered!"
-        grep -i "snapshot too old" "$CUR_OUT"
+    # Check for both error strings: "snapshot is stale" (OpenGauss) and "snapshot too old" (GaussDB/Oracle)
+    if grep -qi "snapshot.*too.*old\|snapshot.*stale" "$CUR_OUT"; then
+        SNAPSHOT_STALE=true
+        log_error "  CURSOR: snapshot stale/too-old error triggered!"
+        grep -i "snapshot.*too.*old\|snapshot.*stale" "$CUR_OUT"
     fi
 
     # Check cursor returned val values (should be 0 at snapshot)
@@ -327,7 +392,6 @@ fi
 echo ""
 echo "  === Select transaction ==="
 if [ -f "$SEL_OUT" ]; then
-    # Show only key lines (first SELECT result, last SELECT result, any errors)
     head_before=$(grep -n "pg_sleep" "$SEL_OUT" | head -1 | cut -d: -f1)
     if [ -n "$head_before" ]; then
         echo "  Before sleep:"
@@ -336,10 +400,10 @@ if [ -f "$SEL_OUT" ]; then
         tail +$((head_before + 1)) "$SEL_OUT" | grep -E "^.*\|.*$" | head -7
     fi
 
-    if grep -qi "snapshot too old" "$SEL_OUT"; then
-        SNAPSHOT_TOO_OLD=true
-        log_error "  SELECT: 'snapshot too old' triggered!"
-        grep -i "snapshot too old" "$SEL_OUT"
+    if grep -qi "snapshot.*too.*old\|snapshot.*stale" "$SEL_OUT"; then
+        SNAPSHOT_STALE=true
+        log_error "  SELECT: snapshot stale/too-old error triggered!"
+        grep -i "snapshot.*too.*old\|snapshot.*stale" "$SEL_OUT"
     fi
 
     second_val=$(sed -n '/pg_sleep/,$ p' "$SEL_OUT" | grep -E '^\s+[0-9]+\s+\|\s+[0-9]+' | head -1 | awk -F'|' '{gsub(/[[:space:]]/, "", $2); print $2}')
@@ -354,38 +418,40 @@ fi
 
 # Cleanup
 db_exec "DROP TABLE IF EXISTS $TABLE_NAME CASCADE;" || true
-log_info "  Resetting undo_space_limit_size..."
+log_info "  Resetting undo config..."
 db_exec "ALTER SYSTEM SET undo_space_limit_size = 33554432;" || true
+db_exec "ALTER SYSTEM SET undo_snapshot_stale_check = on;" || true
 db_exec "SELECT pg_reload_conf();" || true
-rm -f "$CUR_SQL" "$CUR_OUT" "$SEL_SQL" "$SEL_OUT"
+rm -f "$CUR_SQL" "$CUR_OUT" "$SEL_SQL" "$SEL_OUT" "$PRESSURE_SQL"
 
 # Summary
 echo ""
 echo "============================================"
 echo "  Test Result"
 echo "============================================"
-if [ "$SNAPSHOT_TOO_OLD" = true ]; then
-    log_error "'snapshot too old' was triggered!"
-    log_info "Cursor FETCH encountered recycled undo records"
-    log_info "and correctly raised the error instead of silently"
-    log_info "returning wrong data."
+if [ "$SNAPSHOT_STALE" = true ]; then
+    log_error "'snapshot is stale' / 'snapshot too old' was triggered!"
+    log_info "Undo records needed by the long transaction's snapshot"
+    log_info "were forcibly recycled (bypassing oldest_xmin),"
+    log_info "and the stale check correctly raised the error."
     echo "============================================"
     exit 0
 elif [ "$SNAPSHOT_CORRUPT" = true ]; then
     log_error "MVCC snapshot corruption detected (no error raised)"
     log_info "Regular SELECT returned val=$second_val instead of 0."
-    log_info "Undo records were silently recycled, returning current"
-    log_info "data instead of snapshot data. This is worse than"
-    log_info "'snapshot too old' -- data is silently wrong."
+    log_info "Undo records were recycled, returning current data"
+    log_info "instead of snapshot data. This is worse than"
+    log_info "'snapshot is stale' — data is silently wrong."
     echo ""
-    log_info "GaussDB (commercial) may raise 'snapshot too old' error"
-    log_info "instead of silently returning wrong data. Run this test"
-    log_info "on GaussDB with gsql for the proper error behavior."
+    log_info "To trigger the actual error, increase undo pressure:"
+    log_info "  -P 30 -S 10  (more pressure clients, longer sleep)"
+    log_info "  -r 50000      (more rows = more undo per transaction)"
     echo "============================================"
     exit 1
 else
     log_warn "No issue detected. Snapshot data is correct (val=0)."
-    log_info "Try: -r 50000 -w 3900 -R 200 -C 8 for more undo pressure"
+    log_info "Try increasing undo pressure:"
+    log_info "  -P 30 -S 10 -r 50000 -R 200 -C 16"
     echo "============================================"
     exit 2
 fi

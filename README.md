@@ -76,21 +76,21 @@ MIT
 
 ## Undo 测试
 
-OpenGauss/GaussDB UStore undo 回收测试，复现 "snapshot too old" 报错和 MVCC 快照静默损坏：
+OpenGauss/GaussDB UStore undo 回收测试，复现 "snapshot is stale" 报错和 MVCC 快照静默损坏：
 
 ```bash
-# GaussDB（自动使用 gsql，应触发 "snapshot too old" 报错）
+# GaussDB（自动使用 gsql，应触发 "snapshot is stale" 报错）
 ./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
 
-# OpenGauss（自动使用 gsql 或回退 psql，检测静默 MVCC 损坏）
+# OpenGauss（自动使用 gsql 或回退 psql，检测静默 MVCC 损坏或 "snapshot is stale"）
 ./undo/test_snapshot_too_old.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
 
-# 更多参数加大 undo 压力
-./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200 -C 8
+# 更多参数加大 undo 压力（增加并发压力事务数和 sleep 时间）
+./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200 -C 16 -P 30 -S 10
 ```
 
-测试同时运行游标和普通 SELECT 两种长事务：
-- **游标 FETCH**（主要）：在 GaussDB 上触发 "snapshot too old" 报错
-- **普通 SELECT**（回退）：在 OpenGauss 上检测 MVCC 静默损坏（返回当前值而非快照值）
+测试策略：并发 "undo 压力事务"（BEGIN+UPDATE+pg_sleep+COMMIT）积累 undo_used 超过阈值触发强制回收（绕过 oldest_xmin），截断游标快照的 undo 链。同时运行两种长事务：
+- **游标 FETCH**（主要）：触发 "snapshot is stale" 报错
+- **普通 SELECT**（回退）：检测 MVCC 静默损坏（返回当前值而非快照值）
 
-OpenGauss 6.0 的行为差异：游标返回正确快照数据，但普通 SELECT 静默返回错误数据且不报错。
+OpenGauss 6.0 的行为：undo_snapshot_stale_check=on 时游标路径可报错；普通 SELECT 不走 stale check，静默返回错误数据。
