@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>db_shell_bench — 纯 Shell 数据库基准测试工具</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;700;900&family=Source+Han+Sans+SC:wght@300;400;700&display=swap');
+
+:root {
+  --bg-deep: #0a0e17;
+  --bg-surface: #111827;
+  --bg-card: #1a2332;
+  --bg-hover: #243044;
+  --fg-primary: #e8edf5;
+  --fg-secondary: #8b9bb4;
+  --fg-muted: #4a5a78;
+  --accent-green: #22c55e;
+  --accent-green-dim: rgba(34,197,94,0.15);
+  --accent-orange: #f97316;
+  --accent-orange-dim: rgba(249,115,22,0.12);
+  --accent-cyan: #06b6d4;
+  --accent-cyan-dim: rgba(6,182,212,0.10);
+  --accent-red: #ef4444;
+  --accent-red-dim: rgba(239,68,68,0.12);
+  --accent-purple: #a855f7;
+  --accent-purple-dim: rgba(168,85,247,0.10);
+  --border: rgba(255,255,255,0.06);
+  --border-accent: rgba(34,197,94,0.3);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  --shadow-lg: 0 8px 48px rgba(0,0,0,0.6);
+  --mono: 'JetBrains Mono', monospace;
+  --serif: 'Noto Serif SC', serif;
+  --sans: 'Source Han Sans SC', sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: var(--fg-muted) var(--bg-deep);
+}
+
+body {
+  background: var(--bg-deep);
+  color: var(--fg-primary);
+  font-family: var(--sans);
+  line-height: 1.7;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Noise overlay for texture */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Grid pattern overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 60px 60px;
+  opacity: 0.3;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.page-wrapper {
+  position: relative;
+  z-index: 1;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── Hero ── */
+.hero {
+  padding: 80px 0 60px;
+  position: relative;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--accent-green-dim);
+  border: 1px solid var(--border-accent);
+  border-radius: 20px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent-green);
+  letter-spacing: 0.5px;
+  margin-bottom: 24px;
+  animation: fadeIn 0.6s ease-out;
+}
+
+.hero-badge::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: var(--accent-green);
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.hero-title {
+  font-family: var(--mono);
+  font-size: clamp(48px, 8vw, 80px);
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--fg-primary);
+  margin-bottom: 20px;
+  animation: slideUp 0.8s ease-out;
+}
+
+.hero-title .accent {
+  color: var(--accent-green);
+}
+
+.hero-subtitle {
+  font-family: var(--serif);
+  font-size: clamp(18px, 3vw, 24px);
+  font-weight: 400;
+  color: var(--fg-secondary);
+  max-width: 640px;
+  animation: slideUp 1s ease-out;
+}
+
+.hero-tags {
+  display: flex;
+  gap: 12px;
+  margin-top: 28px;
+  animation: slideUp 1.2s ease-out;
+}
+
+.hero-tag {
+  padding: 8px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--fg-secondary);
+  transition: all 0.3s;
+}
+
+.hero-tag:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+  transform: translateY(-2px);
+}
+
+/* ── Nav ── */
+nav {
+  display: flex;
+  gap: 4px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 48px;
+  animation: fadeIn 1.4s ease-out;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+nav a {
+  padding: 8px 20px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--fg-muted);
+  text-decoration: none;
+  transition: all 0.3s;
+  white-space: nowrap;
+}
+
+nav a:hover {
+  color: var(--fg-primary);
+  background: var(--bg-hover);
+}
+
+nav a.active {
+  color: var(--accent-green);
+  background: var(--accent-green-dim);
+}
+
+/* ── Section ── */
+section {
+  padding: 48px 0;
+  animation: fadeIn 0.5s ease-out;
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.section-label .num {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-green);
+  background: var(--accent-green-dim);
+  padding: 4px 12px;
+  border-radius: 6px;
+  letter-spacing: 1px;
+}
+
+.section-label .title {
+  font-family: var(--serif);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+/* ── Cards ── */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 20px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  transition: all 0.4s;
+  position: relative;
+  overflow: hidden;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-green);
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+
+.card:hover {
+  background: var(--bg-hover);
+  transform: translateY(-4px);
+  border-color: rgba(34,197,94,0.2);
+  box-shadow: var(--shadow);
+}
+
+.card:hover::before { opacity: 1; }
+
+.card-icon {
+  width: 44px;
+  height: 44px;
+  background: var(--accent-green-dim);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent-green);
+}
+
+.card-title {
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fg-primary);
+  margin-bottom: 12px;
+}
+
+.card-desc {
+  font-size: 15px;
+  color: var(--fg-secondary);
+  line-height: 1.6;
+}
+
+/* ── Code block ── */
+.code-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 24px 0;
+}
+
+.code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: rgba(0,0,0,0.3);
+  border-bottom: 1px solid var(--border);
+}
+
+.code-header .label {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.code-header .dots {
+  display: flex;
+  gap: 6px;
+}
+
+.code-header .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.code-header .dot:nth-child(1) { background: #ef4444; }
+.code-header .dot:nth-child(2) { background: #f97316; }
+.code-header .dot:nth-child(3) { background: #22c55e; }
+
+.code-body {
+  padding: 20px;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--fg-secondary);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.code-body .kw { color: var(--accent-purple); }
+.code-body .cmd { color: var(--accent-green); }
+.code-body .flag { color: var(--accent-cyan); }
+.code-body .val { color: var(--accent-orange); }
+.code-body .comment { color: var(--fg-muted); font-style: italic; }
+.code-body .string { color: #fbbf24; }
+
+/* ── Table ── */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 24px 0;
+  font-size: 15px;
+}
+
+.data-table thead th {
+  background: var(--bg-card);
+  padding: 12px 16px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-green);
+  text-align: left;
+  border-bottom: 2px solid var(--accent-green-dim);
+  letter-spacing: 0.5px;
+}
+
+.data-table tbody td {
+  padding: 12px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-secondary);
+}
+
+.data-table tbody tr:hover td {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.data-table tbody td:first-child {
+  font-family: var(--mono);
+  color: var(--accent-cyan);
+  font-size: 14px;
+}
+
+/* ── Architecture diagram ── */
+.arch-diagram {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  margin: 24px 0;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.8;
+  overflow-x: auto;
+}
+
+.arch-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  transition: background 0.3s;
+}
+
+.arch-line:hover {
+  background: var(--bg-hover);
+  padding-left: 8px;
+}
+
+.arch-branch {
+  color: var(--accent-cyan);
+  min-width: 20px;
+}
+
+.arch-name {
+  color: var(--accent-green);
+  font-weight: 500;
+}
+
+.arch-desc {
+  color: var(--fg-muted);
+  padding-left: 8px;
+}
+
+/* ── Flow diagram ── */
+.flow-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 32px 0;
+}
+
+.flow-step {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all 0.3s;
+  position: relative;
+}
+
+.flow-step:hover {
+  background: var(--bg-hover);
+  transform: translateX(8px);
+}
+
+.flow-step .step-num {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent-green);
+  background: var(--accent-green-dim);
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+
+.flow-step .step-text {
+  font-size: 15px;
+  color: var(--fg-secondary);
+}
+
+.flow-step .step-text strong {
+  color: var(--fg-primary);
+}
+
+.flow-step .step-text .sql {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent-orange);
+  background: var(--accent-orange-dim);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.flow-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0;
+  color: var(--fg-muted);
+  font-size: 20px;
+  opacity: 0.5;
+}
+
+/* ── Warning box ── */
+.warn-box {
+  background: var(--accent-red-dim);
+  border: 1px solid rgba(239,68,68,0.3);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin: 24px 0;
+}
+
+.warn-box .warn-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-red);
+  margin-bottom: 12px;
+}
+
+.warn-box .warn-title::before {
+  content: '⚠';
+  font-size: 18px;
+}
+
+.warn-box p {
+  font-size: 15px;
+  color: var(--fg-secondary);
+  line-height: 1.6;
+}
+
+/* ── Info box ── */
+.info-box {
+  background: var(--accent-cyan-dim);
+  border: 1px solid rgba(6,182,212,0.2);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin: 24px 0;
+}
+
+.info-box .info-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  margin-bottom: 12px;
+}
+
+.info-box p {
+  font-size: 15px;
+  color: var(--fg-secondary);
+  line-height: 1.6;
+}
+
+/* ── Comparison ── */
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin: 24px 0;
+}
+
+.comparison-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  transition: all 0.3s;
+}
+
+.comparison-card.correct {
+  border-color: rgba(34,197,94,0.3);
+}
+
+.comparison-card.correct .comp-header { color: var(--accent-green); }
+
+.comparison-card.buggy {
+  border-color: rgba(239,68,68,0.3);
+}
+
+.comparison-card.buggy .comp-header { color: var(--accent-red); }
+
+.comp-header {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.comp-body p {
+  font-size: 14px;
+  color: var(--fg-secondary);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.comp-body .highlight {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.comp-body .highlight.green { color: var(--accent-green); }
+.comp-body .highlight.red { color: var(--accent-red); }
+
+/* ── Release timeline ── */
+.timeline {
+  position: relative;
+  padding-left: 40px;
+  margin: 24px 0;
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent-green);
+  opacity: 0.4;
+}
+
+.timeline-item {
+  position: relative;
+  padding: 20px 0 32px;
+}
+
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -28px;
+  top: 22px;
+  width: 12px;
+  height: 12px;
+  background: var(--accent-green);
+  border-radius: 50%;
+  border: 2px solid var(--bg-deep);
+  z-index: 1;
+}
+
+.timeline-item .tl-version {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent-green);
+  margin-bottom: 4px;
+}
+
+.timeline-item .tl-date {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-muted);
+  margin-bottom: 16px;
+}
+
+.tl-features {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tl-feature {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--fg-secondary);
+  transition: all 0.3s;
+}
+
+.tl-feature:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+  transform: translateX(4px);
+}
+
+.tl-feature .feat-tag {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.feat-tag.new { background: var(--accent-green-dim); color: var(--accent-green); }
+.feat-tag.change { background: var(--accent-orange-dim); color: var(--accent-orange); }
+
+/* ── Undo section special ── */
+.undo-section {
+  background: linear-gradient(135deg, var(--bg-surface) 0%, rgba(239,68,68,0.04) 50%, var(--bg-surface) 100%);
+  border-radius: var(--radius);
+  padding: 40px;
+  margin: 24px 0;
+  border: 1px solid rgba(239,68,68,0.15);
+}
+
+.undo-title {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent-red);
+  margin-bottom: 8px;
+}
+
+.undo-subtitle {
+  font-size: 16px;
+  color: var(--fg-secondary);
+  margin-bottom: 24px;
+}
+
+/* ── Footer ── */
+footer {
+  padding: 40px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 80px;
+  text-align: center;
+}
+
+footer p {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+footer .license {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-top: 12px;
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--accent-green);
+}
+
+/* ── Animations ── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .card-grid { grid-template-columns: 1fr; }
+  .comparison-grid { grid-template-columns: 1fr; }
+  .hero-title { font-size: 36px; }
+  nav { gap: 2px; }
+  nav a { padding: 6px 12px; font-size: 13px; }
+  .undo-section { padding: 24px; }
+}
+
+/* ── Scroll reveal ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+</style>
+</head>
+<body>
+
+<div class="page-wrapper">
+
+<!-- ══ Hero ══ -->
+<header class="hero">
+  <div class="hero-badge">OPEN SOURCE · SHELL · DATABASE</div>
+  <h1 class="hero-title">db<span class="accent">_shell_bench</span></h1>
+  <p class="hero-subtitle">纯 Shell 脚本实现的数据库基准测试工具<br>零编译依赖，支持 PostgreSQL / OpenGauss / GaussDB</p>
+  <div class="hero-tags">
+    <span class="hero-tag">PostgreSQL</span>
+    <span class="hero-tag">OpenGauss</span>
+    <span class="hero-tag">GaussDB</span>
+    <span class="hero-tag">TPC-B</span>
+    <span class="hero-tag">UStore</span>
+  </div>
+</header>
+
+<!-- ══ Nav ══ -->
+<nav id="nav">
+  <a href="#quickstart" class="active">快速开始</a>
+  <a href="#architecture">架构</a>
+  <a href="#modes">测试模式</a>
+  <a href="#params">参数</a>
+  <a href="#undo">Undo 测试</a>
+  <a href="#release">版本历史</a>
+</nav>
+
+<!-- ══ Quick Start ══ -->
+<section id="quickstart" class="reveal">
+  <div class="section-label">
+    <span class="num">01</span>
+    <h2 class="title">快速开始</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">PG</div>
+      <div class="card-title">PostgreSQL</div>
+      <div class="card-desc">初始化并运行基准测试，使用 psql 客户端</div>
+      <div class="code-block">
+        <div class="code-header">
+          <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <span class="label">bash</span>
+        </div>
+        <div class="code-body"><span class="comment"># 初始化</span>
+<span class="cmd">./db_shell_bench.sh</span> <span class="flag">init</span> <span class="flag">-s</span> <span class="val">1</span> <span class="flag">-h</span> localhost <span class="flag">-p</span> <span class="val">5432</span> <span class="flag">-U</span> postgres
+
+<span class="comment"># 基准测试</span>
+<span class="cmd">./db_shell_bench.sh</span> <span class="flag">-h</span> localhost <span class="flag">-p</span> <span class="val">5432</span> <span class="flag">-U</span> postgres <span class="flag">-c</span> <span class="val">4</span> <span class="flag">-n</span> <span class="val">100</span> <span class="flag">benchmark</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-icon">OG</div>
+      <div class="card-title">OpenGauss / GaussDB</div>
+      <div class="card-desc">自动检测 gsql 客户端，回退 psql；密码 URL 编码处理特殊字符</div>
+      <div class="code-block">
+        <div class="code-header">
+          <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <span class="label">bash</span>
+        </div>
+        <div class="code-body"><span class="comment"># OpenGauss 初始化</span>
+<span class="cmd">./db_shell_bench.sh</span> <span class="flag">-t</span> <span class="val">opengauss</span> <span class="flag">init</span> <span class="flag">-s</span> <span class="val">1</span> <span class="flag">-W</span> <span class="string">'Pass@123'</span>
+
+<span class="comment"># GaussDB 时间模式</span>
+<span class="cmd">./db_shell_bench.sh</span> <span class="flag">-t</span> <span class="val">gaussdb</span> <span class="flag">-W</span> <span class="string">'Pass@123'</span> <span class="flag">-c</span> <span class="val">4</span> <span class="flag">-T</span> <span class="val">60</span> <span class="flag">benchmark</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-icon">HV</div>
+      <div class="card-title">Heavy 模式</div>
+      <div class="card-desc">更复杂的混合读写测试，10 条 SQL/事务，包含范围扫描和聚合</div>
+      <div class="code-block">
+        <div class="code-header">
+          <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <span class="label">bash</span>
+        </div>
+        <div class="code-body"><span class="cmd">./db_shell_bench.sh</span> <span class="flag">-M</span> <span class="val">heavy</span> <span class="flag">-c</span> <span class="val">4</span> <span class="flag">-T</span> <span class="val">60</span> <span class="flag">benchmark</span>
+
+<span class="comment"># 5读 + 3写 + 2历史查询</span>
+<span class="comment"># 范围扫描 · 聚合 · 时间倒序</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Architecture ══ -->
+<section id="architecture" class="reveal">
+  <div class="section-label">
+    <span class="num">02</span>
+    <h2 class="title">架构设计</h2>
+  </div>
+
+  <div class="arch-diagram">
+    <div class="arch-line"><span class="arch-branch">├──</span> <span class="arch-name">参数解析层</span> <span class="arch-desc">← 提取命令词(init/benchmark)，解析 -h/-p/-U/-W/-M 等</span></div>
+    <div class="arch-line"><span class="arch-branch">├──</span> <span class="arch-name">连接层</span> <span class="arch-desc">← detect_client() → gsql/psql · get_conn_str() → URL编码 · db_exec() · db_exec_quiet()</span></div>
+    <div class="arch-line"><span class="arch-branch">├──</span> <span class="arch-name">初始化层</span> <span class="arch-desc">← init_database() → 建表 · 分批插入 · 建索引 · VACUUM ANALYZE</span></div>
+    <div class="arch-line"><span class="arch-branch">└──</span> <span class="arch-name">基准测试层</span> <span class="arch-desc">← build_txn_sql() · run_benchmark_single() · run_benchmark_multi() · run_benchmark_time() · print_progress()</span></div>
+  </div>
+
+  <h3 style="font-family: var(--sans); font-size: 18px; color: var(--fg-primary); margin: 24px 0 16px;">数据模型</h3>
+  <table class="data-table">
+    <thead><tr><th>表名</th><th>主键</th><th>数据量 (scale=N)</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>{prefix}_branches</td><td>bid</td><td>N</td><td>分行表</td></tr>
+      <tr><td>{prefix}_tellers</td><td>tid</td><td>N × 10</td><td>柜员表</td></tr>
+      <tr><td>{prefix}_accounts</td><td>aid</td><td>N × 100,000</td><td>账户表（主表）</td></tr>
+      <tr><td>{prefix}_history</td><td>无</td><td>动态增长</td><td>历史记录表</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-box">
+    <div class="info-title">初始化进度</div>
+    <p>accounts 表按 100,000 行/批次分批插入，每批次显示已完成行数、耗时、预估剩余时间、速率。建索引、VACUUM ANALYZE 各阶段独立计时。</p>
+  </div>
+
+  <div class="info-box">
+    <div class="info-title">客户端自动选择</div>
+    <p>opengauss/gaussdb 类型自动检测客户端：有 <strong>gsql</strong> 时使用 gsql，否则回退 <strong>psql</strong>（兼容 PostgreSQL 协议）。密码通过 URL 编码的连接字符串传递，特殊字符（@、:、/等）自动处理。</p>
+  </div>
+</section>
+
+<!-- ══ Test Modes ══ -->
+<section id="modes" class="reveal">
+  <div class="section-label">
+    <span class="num">03</span>
+    <h2 class="title">测试模式</h2>
+  </div>
+
+  <div class="comparison-grid">
+    <div class="comparison-card correct">
+      <div class="comp-header">tpcb — 轻量模式</div>
+      <div class="comp-body">
+        <p><span class="highlight green">5 条 SQL</span> / 事务，经典 TPC-B 模型</p>
+        <p>3 × UPDATE（账户、柜员、分行余额）</p>
+        <p>1 × SELECT（查询账户余额）</p>
+        <p>1 × INSERT（插入历史记录）</p>
+        <p style="margin-top: 12px; font-family: var(--mono); font-size: 13px; color: var(--fg-muted);">写密集 · 点查询 · 单行操作</p>
+      </div>
+      <div class="code-block" style="margin-top: 16px;">
+        <div class="code-body" style="padding: 12px; font-size: 13px;"><span class="kw">BEGIN</span>;
+  <span class="cmd">UPDATE</span> accounts <span class="kw">SET</span> abalance += delta <span class="kw">WHERE</span> aid = ?;
+  <span class="cmd">SELECT</span> abalance <span class="kw">FROM</span> accounts <span class="kw">WHERE</span> aid = ?;
+  <span class="cmd">UPDATE</span> tellers <span class="kw">SET</span> tbalance += delta <span class="kw">WHERE</span> tid = ?;
+  <span class="cmd">UPDATE</span> branches <span class="kw">SET</span> bbalance += delta <span class="kw">WHERE</span> bid = ?;
+  <span class="cmd">INSERT INTO</span> history <span class="kw">VALUES</span> (...);
+<span class="kw">COMMIT</span>;</div>
+      </div>
+    </div>
+
+    <div class="comparison-card">
+      <div class="comp-header" style="color: var(--accent-orange);">heavy — 重量模式</div>
+      <div class="comp-body">
+        <p><span class="highlight" style="color: var(--accent-orange);">10 条 SQL</span> / 事务，混合读写负载</p>
+        <p>5 × 读操作（点查询 + 范围扫描 + 聚合）</p>
+        <p>3 × 写操作（UPDATE 余额 + INSERT 历史记录）</p>
+        <p>2 × 历史查询（按时间倒序）</p>
+        <p style="margin-top: 12px; font-family: var(--mono); font-size: 13px; color: var(--fg-muted);">混合读写 · 范围扫描 · 聚合查询</p>
+      </div>
+      <div class="code-block" style="margin-top: 16px;">
+        <div class="code-body" style="padding: 12px; font-size: 13px;"><span class="kw">BEGIN</span>;
+  <span class="cmd">SELECT</span> ... <span class="kw">WHERE</span> aid = ?;           <span class="comment">-- 点查询</span>
+  <span class="cmd">SELECT</span> ... <span class="kw">WHERE</span> bid = ?;           <span class="comment">-- 点查询</span>
+  <span class="cmd">SELECT</span> ... <span class="kw">WHERE</span> tid = ?;           <span class="comment">-- 点查询</span>
+  <span class="cmd">SELECT</span> ... <span class="kw">ORDER BY</span> aid <span class="kw">LIMIT</span> 10; <span class="comment">-- 范围扫描</span>
+  <span class="cmd">SELECT</span> <span class="kw">avg</span>(...) <span class="kw">WHERE</span> bid = ?;    <span class="comment">-- 聚合查询</span>
+  <span class="cmd">UPDATE</span> accounts <span class="kw">SET</span> ...;       <span class="comment">-- 写</span>
+  <span class="cmd">UPDATE</span> tellers <span class="kw">SET</span> ...;        <span class="comment">-- 写</span>
+  <span class="cmd">UPDATE</span> branches <span class="kw">SET</span> ...;       <span class="comment">-- 写</span>
+  <span class="cmd">INSERT INTO</span> history ...;       <span class="comment">-- 写</span>
+  <span class="cmd">SELECT</span> ... <span class="kw">ORDER BY</span> mtime <span class="kw">DESC</span>; <span class="comment">-- 历史查询</span>
+<span class="kw">COMMIT</span>;</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Parameters ══ -->
+<section id="params" class="reveal">
+  <div class="section-label">
+    <span class="num">04</span>
+    <h2 class="title">参数说明</h2>
+  </div>
+
+  <h3 style="font-family: var(--sans); font-size: 18px; color: var(--fg-primary); margin-bottom: 16px;">基准测试参数</h3>
+  <table class="data-table">
+    <thead><tr><th>参数</th><th>说明</th><th>默认值</th></tr></thead>
+    <tbody>
+      <tr><td>-t TYPE</td><td>数据库类型 (postgres/opengauss/gaussdb)</td><td>postgres</td></tr>
+      <tr><td>-h HOST</td><td>数据库主机</td><td>localhost</td></tr>
+      <tr><td>-p PORT</td><td>端口</td><td>5432</td></tr>
+      <tr><td>-d DB</td><td>数据库</td><td>postgres</td></tr>
+      <tr><td>-U USER</td><td>用户</td><td>postgres</td></tr>
+      <tr><td>-W PASS</td><td>密码</td><td>-</td></tr>
+      <tr><td>-P PREFIX</td><td>表前缀</td><td>dbbench</td></tr>
+      <tr><td>-s SCALE</td><td>初始化缩放因子</td><td>1</td></tr>
+      <tr><td>-M MODE</td><td>测试模式 (tpcb/heavy)</td><td>tpcb</td></tr>
+      <tr><td>-c CLIENTS</td><td>并发数</td><td>1</td></tr>
+      <tr><td>-n TXNS</td><td>事务数/客户端</td><td>-</td></tr>
+      <tr><td>-T SECS</td><td>持续时间(秒)</td><td>-</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-family: var(--sans); font-size: 18px; color: var(--fg-primary); margin: 32px 0 16px;">Undo 测试参数</h3>
+  <table class="data-table">
+    <thead><tr><th>参数</th><th>说明</th><th>默认值</th></tr></thead>
+    <tbody>
+      <tr><td>-t TYPE</td><td>数据库类型 (gaussdb/opengauss)</td><td>gaussdb</td></tr>
+      <tr><td>-r ROWS</td><td>初始行数</td><td>10000</td></tr>
+      <tr><td>-w WIDTH</td><td>数据列宽度(字节)</td><td>3900</td></tr>
+      <tr><td>-R ROUNDS</td><td>快速更新轮次</td><td>100</td></tr>
+      <tr><td>-C CLIENTS</td><td>快速更新并发数</td><td>8</td></tr>
+      <tr><td>-P PRESSURE</td><td>undo 压力事务并发数</td><td>20</td></tr>
+      <tr><td>-S SLEEP</td><td>压力事务 pg_sleep 秒数</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══ Undo Test ══ -->
+<section id="undo" class="reveal">
+  <div class="section-label">
+    <span class="num">05</span>
+    <h2 class="title">Undo 回收测试</h2>
+  </div>
+
+  <div class="undo-section">
+    <div class="undo-title">OpenGauss UStore MVCC 快照损坏复现</div>
+    <div class="undo-subtitle">发现比 "snapshot is stale" 更严重的问题 — 静默返回错误数据而不报错</div>
+
+    <div class="comparison-grid">
+      <div class="comparison-card correct">
+        <div class="comp-header">正确行为 · GaussDB / Oracle</div>
+        <div class="comp-body">
+          <p>undo 记录被回收后 → 游标报 <span class="highlight green">"snapshot is stale"</span></p>
+          <p>用户知道数据不可用，可以重试</p>
+          <p style="margin-top: 12px; font-family: var(--mono); font-size: 13px;">ERRCODE_SNAPSHOT_STALE</p>
+        </div>
+      </div>
+      <div class="comparison-card buggy">
+        <div class="comp-header">BUG · OpenGauss 6.0</div>
+        <div class="comp-body">
+          <p>undo 记录被回收后 → <span class="highlight red">不报错</span>，静默返回当前数据</p>
+          <p>普通 SELECT 返回 <span class="highlight red">val≠0</span> 而非快照值 val=0</p>
+          <p>用户以为数据正确，其实已经错了 — 比 "snapshot is stale" 更严重</p>
+        </div>
+      </div>
+    </div>
+
+    <h3 style="font-family: var(--sans); font-size: 18px; color: var(--fg-primary); margin: 24px 0 16px;">触发原理</h3>
+
+    <div class="info-box" style="margin-bottom: 16px;">
+      <div class="info-title">两层 undo 回收机制</div>
+      <p><strong>正常回收</strong>：尊重 oldest_xmin，只回收已提交且无人引用的 undo 记录<br>
+      <strong>强制回收</strong>：undo_used 超过 undo_threshold（80% × undo_space_limit）时，<strong style="color: var(--accent-red);">绕过 oldest_xmin</strong> 强制回收</p>
+    </div>
+
+    <div class="flow-container">
+      <div class="flow-step">
+        <div class="step-num">1</div>
+        <div class="step-text">创建 ustore 表，插入 <strong>val=0</strong> 数据</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step">
+        <div class="step-num">2</div>
+        <div class="step-text">Session 1 开启长事务游标，FETCH 获取快照数据</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step">
+        <div class="step-num">3</div>
+        <div class="step-text">N 个并发 <span class="sql">BEGIN + UPDATE 全表 + pg_sleep + COMMIT</span>，积累 undo_used 超过阈值</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step">
+        <div class="step-num">4</div>
+        <div class="step-text"><strong style="color: var(--accent-red);">强制回收触发</strong>，绕过 oldest_xmin，回收游标快照需要的 undo 记录</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step">
+        <div class="step-num">5</div>
+        <div class="step-text">游标继续 FETCH → undo 链截断 → 报 <strong style="color: var(--accent-green);">"snapshot is stale"</strong>（GaussDB）或静默返回当前值（OpenGauss bug）</div>
+      </div>
+    </div>
+
+    <h3 style="font-family: var(--sans); font-size: 18px; color: var(--fg-primary); margin: 24px 0 16px;">自动配置</h3>
+    <div class="info-box">
+      <div class="info-title">脚本自动配置以下参数</div>
+      <p><span style="font-family: var(--mono); color: var(--accent-cyan);">undo_space_limit_size = 102400</span>（800MB，阈值 640MB）<br>
+      <span style="font-family: var(--mono); color: var(--accent-cyan);">undo_snapshot_stale_check = on</span>（确保报错功能开启）</p>
+    </div>
+  </div>
+
+  <div class="code-block" style="margin-top: 24px;">
+    <div class="code-header">
+      <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <span class="label">undo test examples</span>
+    </div>
+    <div class="code-body"><span class="comment"># GaussDB — 应触发 "snapshot is stale" 报错</span>
+<span class="cmd">./undo/test_snapshot_too_old.sh</span> <span class="flag">-t</span> <span class="val">gaussdb</span> <span class="flag">-h</span> localhost <span class="flag">-p</span> <span class="val">8000</span> <span class="flag">-U</span> root <span class="flag">-W</span> <span class="string">'Pass@123'</span>
+
+<span class="comment"># OpenGauss — 检测静默 MVCC 损坏或 "snapshot is stale"</span>
+<span class="cmd">./undo/test_snapshot_too_old.sh</span> <span class="flag">-t</span> <span class="val">opengauss</span> <span class="flag">-h</span> localhost <span class="flag">-p</span> <span class="val">5433</span> <span class="flag">-U</span> gaussdb <span class="flag">-W</span> <span class="string">'Enmotech@123'</span>
+
+<span class="comment"># 加大 undo 压力</span>
+<span class="cmd">./undo/test_snapshot_too_old.sh</span> <span class="flag">-t</span> gaussdb <span class="flag">-r</span> <span class="val">50000</span> <span class="flag">-R</span> <span class="val">200</span> <span class="flag">-C</span> <span class="val">16</span> <span class="flag">-P</span> <span class="val">30</span> <span class="flag">-S</span> <span class="val">10</span> <span class="flag">-W</span> <span class="string">'Pass@123'</span></div>
+  </div>
+
+  <div class="warn-box">
+    <div class="warn-title">注意事项</div>
+    <p>仅适用于 OpenGauss/GaussDB（PostgreSQL 无 undo 机制）<br>需要 <code>enable_ustore=on</code><br>检测的是 MVCC 快照静默损坏，不仅限于 "snapshot is stale" 报错<br>错误信息搜索包含 <strong>"snapshot is stale"</strong> 和 <strong>"snapshot too old"</strong> 两种</p>
+  </div>
+</section>
+
+<!-- ══ Release History ══ -->
+<section id="release" class="reveal">
+  <div class="section-label">
+    <span class="num">06</span>
+    <h2 class="title">版本历史</h2>
+  </div>
+
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="tl-version">v2</div>
+      <div class="tl-date">2026-05-21</div>
+      <div class="tl-features">
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 多数据库支持 PostgreSQL / OpenGauss / GaussDB</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 密码参数 -W PASS，URL 编码处理特殊字符</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 客户端自动选择 gsql / psql</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> heavy 测试模式（10 SQL/事务，5读+3写+2历史查询）</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 初始化进度 — 分批插入 100K 行/批次，实时进度</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 阶段耗时 — 建索引 / VACUUM ANALYZE 独立计时</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 实时进度 — 每 3 秒追加一行进度</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 灵活参数顺序 — init -s 10 和 -s 10 init</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> UStore undo 回收测试 — 复现 MVCC 快照静默损坏</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 游标 FETCH 测试 — 触发 "snapshot is stale" 报错</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> undo 压力事务 — -P/-S 参数，积累 undo_used 超阈值触发强制回收</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> undo_snapshot_stale_check 自动检查启用</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 双错误字符串检测 "snapshot is stale" + "snapshot too old"</div>
+        <div class="tl-feature"><span class="feat-tag change">CHG</span> 事务数参数 -t 改为 -n（-t 用于数据库类型）</div>
+        <div class="tl-feature"><span class="feat-tag change">CHG</span> 初始化使用 db_exec_quiet 抑制命令反馈</div>
+      </div>
+    </div>
+    <div class="timeline-item">
+      <div class="tl-version">v1</div>
+      <div class="tl-date">2026-05-20</div>
+      <div class="tl-features">
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> PostgreSQL 基准测试工具</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> TPC-B 事务模式（5 SQL/事务）</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 单客户端和多客户端并发测试</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 事务数模式和时间模式</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 15 个测试用例</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Footer ══ -->
+<footer>
+  <p>db_shell_bench — 纯 Shell 数据库基准测试工具</p>
+  <span class="license">MIT License</span>
+</footer>
+
+</div>
+
+<script>
+// Scroll reveal
+const reveals = document.querySelectorAll('.reveal');
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+    }
+  });
+}, { threshold: 0.1 });
+
+reveals.forEach(el => observer.observe(el));
+
+// Active nav tracking
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('nav a');
+
+const navObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      navLinks.forEach(link => {
+        link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id);
+      });
+    }
+  });
+}, { threshold: 0.3 });
+
+sections.forEach(section => navObserver.observe(section));
+
+// Smooth scroll for nav links
+navLinks.forEach(link => {
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    const target = document.querySelector(link.getAttribute('href'));
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+</script>
+</body>
+</html>
