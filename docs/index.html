@@ -812,6 +812,7 @@ footer .license {
   <a href="#modes">测试模式</a>
   <a href="#params">参数</a>
   <a href="#undo">Undo 测试</a>
+  <a href="#mcp">MCP Server</a>
   <a href="#release">版本历史</a>
 </nav>
 
@@ -1101,14 +1102,97 @@ footer .license {
   </div>
 </section>
 
+<!-- ══ MCP Server ══ -->
+<section id="mcp" class="reveal">
+  <div class="section-label">
+    <span class="num">06</span>
+    <h2 class="title">PostgreSQL MCP Server</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon" style="background: var(--accent-cyan-dim); color: var(--accent-cyan);">Q</div>
+      <div class="card-title">SQL 查询执行</div>
+      <div class="card-desc">
+        <strong>execute_query</strong> — 只读 SELECT 查询，自动 LIMIT，Markdown 表格输出<br>
+        <strong>execute_dml</strong> — INSERT/UPDATE/DELETE，默认 dry_run 只验证语法
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background: var(--accent-cyan-dim); color: var(--accent-cyan);">M</div>
+      <div class="card-title">数据库元数据</div>
+      <div class="card-desc">
+        <strong>list_tables</strong> · <strong>describe_table</strong> · <strong>list_indexes</strong><br>
+        <strong>list_schemas</strong> · <strong>get_table_stats</strong> — 列定义、索引、约束、统计
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background: var(--accent-cyan-dim); color: var(--accent-cyan);">P</div>
+      <div class="card-title">性能监控</div>
+      <div class="card-desc">
+        <strong>get_active_queries</strong> · <strong>get_slow_queries</strong><br>
+        <strong>get_lock_waits</strong> · <strong>get_connections_summary</strong> · <strong>get_database_size</strong>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background: var(--accent-cyan-dim); color: var(--accent-cyan);">E</div>
+      <div class="card-title">执行计划分析</div>
+      <div class="card-desc">
+        <strong>explain_plan</strong> — EXPLAIN (VERBOSE, COSTS) 输出<br>
+        <strong>explain_plan_json</strong> · <strong>get_stats_info</strong> — JSON 格式计划 + pg_stats 列级统计
+      </div>
+    </div>
+  </div>
+
+  <div class="code-block" style="margin-top: 24px;">
+    <div class="code-header">
+      <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <span class="label">.mcp.json</span>
+    </div>
+    <div class="code-body">{
+  <span class="kw">"mcpServers"</span>: {
+    <span class="kw">"pg-server"</span>: {
+      <span class="kw">"command"</span>: <span class="string">"python3"</span>,
+      <span class="kw">"args"</span>: [<span class="string">"-m"</span>, <span class="string">"pg_mcp_server.server"</span>],
+      <span class="kw">"env"</span>: {
+        <span class="kw">"PGHOST"</span>: <span class="string">"127.0.0.1"</span>,
+        <span class="kw">"PGPORT"</span>: <span class="string">"5432"</span>,
+        <span class="kw">"PGDATABASE"</span>: <span class="string">"postgres"</span>,
+        <span class="kw">"PGUSER"</span>: <span class="string">"lcj"</span>
+      }
+    }
+  }
+}</div>
+  </div>
+
+  <div class="info-box" style="margin-top: 24px;">
+    <div class="info-title">安全措施</div>
+    <p>SELECT-only 白名单 — execute_query 只允许 SELECT/EXPLAIN/SHOW/WITH 查询<br>
+    DML 默认 dry_run — execute_dml 默认只验证语法不执行，需显式 dry_run=false<br>
+    结果行数上限 — 最大返回 1000 行，防止大量数据泄露</p>
+  </div>
+</section>
+
 <!-- ══ Release History ══ -->
 <section id="release" class="reveal">
   <div class="section-label">
-    <span class="num">06</span>
+    <span class="num">07</span>
     <h2 class="title">版本历史</h2>
   </div>
 
   <div class="timeline">
+        <div class="timeline-item">
+      <div class="tl-version">v3</div>
+      <div class="tl-date">2026-05-26</div>
+      <div class="tl-features">
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> PostgreSQL MCP Server — FastMCP + psycopg3 连接池</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> SQL 查询执行 — execute_query + execute_dml (dry_run)</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 数据库元数据 — list_tables / describe_table / list_indexes 等</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 性能监控 — active_queries / slow_queries / lock_waits 等</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> 执行计划分析 — explain_plan / explain_plan_json / get_stats_info</div>
+        <div class="tl-feature"><span class="feat-tag new">NEW</span> .mcp.json Claude Code 自动加载配置</div>
+      </div>
+    </div>
     <div class="timeline-item">
       <div class="tl-version">v2</div>
       <div class="tl-date">2026-05-21</div>

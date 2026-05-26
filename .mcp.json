@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "pg-server": {
+      "command": "python3",
+      "args": ["-m", "pg_mcp_server.server"],
+      "env": {
+        "PGHOST": "127.0.0.1",
+        "PGPORT": "5432",
+        "PGDATABASE": "postgres",
+        "PGUSER": "lcj"
+      }
+    }
+  }
+}

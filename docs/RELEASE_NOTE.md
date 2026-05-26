@@ -1,5 +1,18 @@
 # db_shell_bench Release Note
 
+## v3 (2026-05-26)
+
+### 新增功能
+
+- **PostgreSQL MCP Server** — 基于 FastMCP 框架的 MCP Server，为 Claude Code 提供 4 种数据库工具能力
+  - SQL 查询执行：`execute_query`（只读 SELECT）、`execute_dml`（写操作，默认 dry_run）
+  - 数据库元数据：`list_tables`、`describe_table`、`list_indexes`、`list_schemas`、`get_table_stats`
+  - 性能监控：`get_active_queries`、`get_slow_queries`、`get_lock_waits`、`get_connections_summary`、`get_database_size`
+  - 执行计划分析：`explain_plan`、`explain_plan_json`、`get_stats_info`
+- **安全措施** — SELECT-only 白名单、DML 默认 dry_run、结果行数上限 1000
+- **环境变量连接配置** — PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD
+- **`.mcp.json` 配置** — Claude Code 自动加载 MCP Server
+
 ## v2 (2026-05-21)
 
 ### 新增功能
