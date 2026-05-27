@@ -298,26 +298,62 @@ log_info "  After cleanup: ${CLEANUP_MS}ms (${CLEANUP_SEC}s, ${CLEANUP_RATIO}x b
 # ── Step 6 ──
 log_step "6/6: Checking wait events"
 
-echo ""
-echo -e "${CYAN}  Undo-related wait events (pg_thread_wait_status):${NC}"
-db_query "
-    SELECT wait_event, count(*)
-    FROM pg_thread_wait_status
-    WHERE wait_event LIKE '%undo%'
-      AND db_name = '$DB_NAME'
-    GROUP BY wait_event;
-" 2>/dev/null | head -5
+# Detect available wait event columns (GaussDB/OpenGauss have different schemas)
+WAIT_COLS=$(db_query "
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'pg_thread_wait_status'
+    ORDER BY ordinal_position;
+" 2>/dev/null | tr '\n' ',')
 
 echo ""
-echo -e "${CYAN}  Non-none wait events (pg_thread_wait_status):${NC}"
-db_query "
-    SELECT wait_status, wait_event, count(*)
-    FROM pg_thread_wait_status
-    WHERE wait_status != 'none'
-      AND db_name = '$DB_NAME'
-    GROUP BY wait_status, wait_event
-    ORDER BY count(*) DESC;
-" 2>/dev/null | head -5
+if echo "$WAIT_COLS" | grep -q 'wait_event'; then
+    # OpenGauss: has wait_event + db_name columns
+    if echo "$WAIT_COLS" | grep -q 'db_name'; then
+        DB_FILTER="AND db_name = '$DB_NAME'"
+    else
+        DB_FILTER=""
+    fi
+    echo -e "${CYAN}  Undo-related wait events (pg_thread_wait_status):${NC}"
+    db_query "
+        SELECT wait_event, count(*)
+        FROM pg_thread_wait_status
+        WHERE wait_event LIKE '%undo%'
+          $DB_FILTER
+        GROUP BY wait_event;
+    " 2>/dev/null | head -5
+
+    echo ""
+    echo -e "${CYAN}  Non-none wait events (pg_thread_wait_status):${NC}"
+    db_query "
+        SELECT wait_status, wait_event, count(*)
+        FROM pg_thread_wait_status
+        WHERE wait_status != 'none'
+          $DB_FILTER
+        GROUP BY wait_status, wait_event
+        ORDER BY count(*) DESC;
+    " 2>/dev/null | head -5
+else
+    # GaussDB or version without wait_event column: try alternative views
+    echo -e "${CYAN}  Undo-related wait events (pg_stat_activity):${NC}"
+    db_query "
+        SELECT wait_event_type, wait_event, count(*)
+        FROM pg_stat_activity
+        WHERE wait_event LIKE '%undo%'
+        GROUP BY wait_event_type, wait_event;
+    " 2>/dev/null | head -5
+
+    # Fallback: just check blocking sessions
+    if [ $? -ne 0 ] || [ -z "$(db_query "SELECT count(*) FROM pg_stat_activity WHERE waiting = true;" 2>/dev/null)" ]; then
+        echo -e "${CYAN}  Active blocking sessions (pg_stat_activity.waiting):${NC}"
+        db_query "
+            SELECT pid, usename, state, waiting, query
+            FROM pg_stat_activity
+            WHERE state IN ('active', 'idle in transaction')
+              AND pid != pg_backend_pid()
+            ORDER BY state_change;
+        " 2>/dev/null | head -5
+    fi
+fi
 
 # ── Cleanup ──
 db_exec "DROP TABLE IF EXISTS $TABLE_NAME CASCADE;" 2>/dev/null
