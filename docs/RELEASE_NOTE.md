@@ -36,7 +36,7 @@
 - **阶段耗时** — 建索引、VACUUM ANALYZE 各阶段独立计时
 - **实时进度** — 基准测试每 3 秒追加一行进度（不再覆盖）
 - **灵活参数顺序** — 支持 `init -s 10` 和 `-s 10 init` 两种格式
-- **Ustore undo 回收测试** — 新增 undo 目录，复现 OpenGauss/GaussDB Ustore undo 回收导致的 MVCC 快照静默损坏问题（比 "snapshot too old" 更严重）
+- **Ustore snapshot too old 测试** — 新增 snapshot-too-old 目录，复现 OpenGauss/GaussDB Ustore undo 回收导致的 MVCC 快照静默损坏问题（比 "snapshot too old" 更严重）
 - **游标 FETCH 测试** — 使用 DECLARE CURSOR + pg_sleep + FETCH 触发 "snapshot is stale" 报错（GaussDB/OpenGauss），同时用普通 SELECT 检测静默损坏（OpenGauss）
 - **undo 压力事务** — 新增 -P/-S 参数，并发 BEGIN+UPDATE+pg_sleep+COMMIT 事务积累 undo_used 超过阈值触发强制回收（绕过 oldest_xmin）
 - **undo_snapshot_stale_check** — 自动检查并启用 undo_snapshot_stale_check 参数，确保 "snapshot is stale" 报错功能开启

@@ -74,19 +74,19 @@ init 命令分批插入数据，实时显示进度：
 
 MIT
 
-## Undo 测试
+## Snapshot Too Old 测试
 
 OpenGauss/GaussDB UStore undo 回收测试，复现 "snapshot is stale" 报错和 MVCC 快照静默损坏：
 
 ```bash
 # GaussDB（自动使用 gsql，应触发 "snapshot is stale" 报错）
-./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
+./snapshot-too-old/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
 
 # OpenGauss（自动使用 gsql 或回退 psql，检测静默 MVCC 损坏或 "snapshot is stale"）
-./undo/test_snapshot_too_old.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
+./snapshot-too-old/test_snapshot_too_old.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
 
 # 更多参数加大 undo 压力（增加并发压力事务数和 sleep 时间）
-./undo/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200 -C 16 -P 30 -S 10
+./snapshot-too-old/test_snapshot_too_old.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123' -r 50000 -R 200 -C 16 -P 30 -S 10
 ```
 
 测试策略：并发 "undo 压力事务"（BEGIN+UPDATE+pg_sleep+COMMIT）积累 undo_used 超过阈值触发强制回收（绕过 oldest_xmin），截断游标快照的 undo 链。同时运行两种长事务：
