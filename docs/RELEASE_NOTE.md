@@ -1,5 +1,20 @@
 # db_shell_bench Release Note
 
+## v5 (2026-05-28)
+
+### 变更
+
+- **仓库结构整理** — 每个功能独立目录，各目录下放 README.md 使用说明
+  - `benchmark/` — 基准测试工具（从根目录和 docs/ 归类）
+  - `pg_mcp_server/` — MCP Server（从 docs/ 移入使用文档作为 README）
+  - `snapshot-too-old/` — 新增 README（从 undo 重命名）
+  - `fetch-undo-record/` — 已有 README
+  - `plan-jump/` — 执行计划跳变 SOP（从 docs/ 归类）
+  - 根 README 精简为功能列表表格 + 简介
+  - 新增功能规范：独立目录 + README.md
+- **undo 目录重命名** — `undo/` → `snapshot-too-old/`
+- **fetch undo record 优化** — 恢复 updater pg_sleep(2)，18 数据点平滑退化曲线；加 elapsed 时间线；-V verbose 打印 SQL；ON_ERROR_STOP=1 防卡死；动态探测 wait_event 列兼容 GaussDB
+
 ## v4 (2026-05-27)
 
 ### 新增功能
