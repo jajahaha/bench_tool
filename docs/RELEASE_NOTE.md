@@ -6,8 +6,10 @@
 
 - **fetch undo record 等待事件复现** — 新增 fetch-undo-record 目录，端到端复现 OpenGauss/GaussDB Ustore "fetch undo record" 等待事件导致的查询性能退化
   - 长事务持续 UPDATE 扩展 undo chain，并发全表扫描必须遍历 undo chain 获取一致读
+  - 默认参数（20000行 × 3KB × 35轮 UPDATE）可从 ~2s 基线退化到 ~10s+ 峰值
   - 每轮测量扫描耗时，展示从基线到逐步退化的趋势
-  - 检测 pg_stat_activity 和 dbe_perf.wait_events 中的 "fetch undo record" 事件
+  - COMMIT 后自动检测 undo chain 截断，扫描恢复到基线
+  - 检测 pg_thread_wait_status 中的 "fetch undo record" 等待事件
 
 ## v3 (2026-05-26)
 
