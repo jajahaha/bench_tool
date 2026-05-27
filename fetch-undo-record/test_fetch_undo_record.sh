@@ -207,7 +207,7 @@ echo "Database:      $DB_TYPE ($DB_HOST:$DB_PORT/$DB_NAME)"
 echo "User:          $DB_USER"
 echo "Client:        $DB_CLIENT"
 echo "Table:         $TABLE_NAME (ustore, $ROW_COUNT rows × ${DATA_WIDTH}B)"
-echo "Update rounds: $UPDATE_ROUNDS (continuous, no sleep between UPDATEs)"
+echo "Update rounds: $UPDATE_ROUNDS (pg_sleep $MEASURE_GAP between each)"
 echo "Measure gap:   $MEASURE_GAP seconds"
 echo "============================================================"
 echo ""
@@ -256,16 +256,17 @@ log_step "5/6: Long transaction UPDATE + concurrent scan"
 
 echo ""
 echo -e "${CYAN}  Strategy:${NC}"
-echo -e "${CYAN}    Updater: BEGIN → $UPDATE_ROUNDS continuous UPDATEs → COMMIT${NC}"
+echo -e "${CYAN}    Updater: BEGIN → UPDATE val+1 × $UPDATE_ROUNDS rounds (pg_sleep $MEASURE_GAP between each) → COMMIT${NC}"
 echo -e "${CYAN}    Main: measure SELECT * every $MEASURE_GAP seconds until updater exits${NC}"
 echo -e "${CYAN}    Expected: scan grows from ~${BASELINE_SEC}s to ~10s, then recovers${NC}"
 echo ""
 
-# Build updater SQL — continuous UPDATEs, no pg_sleep
+# Build updater SQL — UPDATE + pg_sleep per round to keep transaction open
 {
     echo "BEGIN;"
     for R in $(seq 1 $UPDATE_ROUNDS); do
         echo "UPDATE $TABLE_NAME SET val = val + 1;"
+        echo "SELECT pg_sleep($MEASURE_GAP);"
     done
     echo "COMMIT;"
 } > "$UPDATER_SQL"

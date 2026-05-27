@@ -40,7 +40,7 @@ Ustore 引擎采用 undo-based MVCC，每次 UPDATE 产生一条 undo record，�
 
 1. 创建 ustore 表（20000 行 × 3KB），插入初始数据
 2. 测量基线扫描耗时（3 次采样取均值）
-3. 启动后台 updater：`BEGIN` → 连续 `UPDATE val+1 × N` → `COMMIT`（无 pg_sleep）
+3. 启动后台 updater：`BEGIN` → `UPDATE val+1` × N 轮（每轮 pg_sleep 间隔） → `COMMIT`
 4. 主脚本紧凑循环测量全表扫描耗时（间隔 2 秒）
 5. 扫描耗时从基线逐步增长，突破 10s 后继续退化
 6. updater COMMIT 后 undo chain 截断，扫描立即恢复到基线
