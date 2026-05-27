@@ -34,16 +34,16 @@ Ustore 引擎采用 undo-based MVCC，每次 UPDATE 产生一条 undo record，�
 | -r ROWS | 行数 | 20000 |
 | -w WIDTH | 每行数据宽度(字节) | 3000 |
 | -R ROUNDS | 长事务 UPDATE 轮次 | 35 |
-| -I INTERVAL | 扫描测量间隔(秒) | 5 |
+| -I GAP | 扫描测量间隔(秒) | 2 |
 
 ## 测试流程
 
 1. 创建 ustore 表（20000 行 × 3KB），插入初始数据
 2. 测量基线扫描耗时（3 次采样取均值）
-3. 启动后台 updater：`BEGIN` → 逐轮 `UPDATE val+1` → `pg_sleep` 保持事务 → `COMMIT`
-4. 主脚本每轮 UPDATE 后测量全表扫描耗时
-5. 扫描耗时从 ~2s 基线逐步增长到 ~10s+ 峰值（默认参数）
-6. updater COMMIT 后 undo chain 截断，扫描恢复到基线
+3. 启动后台 updater：`BEGIN` → 连续 `UPDATE val+1 × N` → `COMMIT`（无 pg_sleep）
+4. 主脚本紧凑循环测量全表扫描耗时（间隔 2 秒）
+5. 扫描耗时从基线逐步增长，突破 10s 后继续退化
+6. updater COMMIT 后 undo chain 截断，扫描立即恢复到基线
 7. 检测 undo 相关等待事件
 
 ## 增强效果
@@ -63,15 +63,16 @@ Ustore 引擎采用 undo-based MVCC，每次 UPDATE 产生一条 undo record，�
 典型输出示例：
 
 ```
-  Round 1/35:  scan=2331ms (2.3s) | base=1941ms (1.9s) | 1.2x
-  Round 10/35: scan=6444ms (6.4s) | base=1941ms (1.9s) | 3.3x
-  Round 14/35: scan=10957ms (10.9s) | base=1941ms (1.9s) | 5.6x
-  Round 18/35: scan=13886ms (13.8s) | base=1941ms (1.9s) | 7.1x  ← 峰值
-  Round 20 (COMMITTED): scan=13178ms (13.1s) ← undo chain 截断后首次扫描
-  Post-commit: 2108ms (2.1s) ← 恢复到基线
-  After cleanup: 2033ms (2.0s) ← 完全恢复
+  #1 (3s):   scan=3517ms (3.5s) | base=1647ms (1.6s) | 2.0x
+  #2 (12s):  scan=5898ms (5.8s) | base=1647ms (1.6s) | 3.5x
+  #3 (23s):  scan=8363ms (8.3s) | base=1647ms (1.6s) | 5.0x
+  #4 (36s):  scan=10640ms (10.6s) | base=1647ms (1.6s) | 6.4x ← 首次突破 10s
+  #12 (231s): scan=30476ms (30.4s) | base=1647ms (1.6s) | 18.1x ← 峰值
+  Post-commit: 1708ms (1.7s) ← 恢复到基线
+  After cleanup: 1715ms (1.7s) ← 完全恢复
 ```
 
+- **elapsed**：从测试开始的累计秒数，真实时间线
 - **ratio**：当前扫描 / 基线均值，越大说明退化越严重
 - **COMMITTED**：后台 updater 已提交，undo chain 截断，后续扫描将恢复
 - **Post-commit / After cleanup**：确认恢复到基线水平
@@ -104,5 +105,5 @@ opengauss/gaussdb 类型自动检测客户端：
 - 本测试仅适用于 OpenGauss/GaussDB（PostgreSQL 无 undo 机制）
 - 需要 `enable_ustore = on`，脚本会自动检查并设置
 - 测试完成后自动清理测试表
-- 长事务持续时间取决于 `-R × -I` 参数，默认 35 × 5 = 175 秒
+- updater 连续执行 UPDATE（无 pg_sleep），总测试时间约 3-4 分钟
 - 测试期间数据库负载较高，建议在测试环境运行

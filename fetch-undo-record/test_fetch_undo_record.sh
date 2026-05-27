@@ -14,10 +14,10 @@
 #
 # 测试流程：
 #   1. 创建 ustore 表 (20000行 × 3KB宽度)，插入初始数据
-#   2. 启动后台 updater：BEGIN → 逐轮 UPDATE val+1 → pg_sleep 保持事务
-#   3. 每轮 UPDATE 后测量全表扫描耗时
-#   4. 随着更新轮次增加，SELECT 耗时从 ~1.6s 逐步增长到 ~10s+
-#   5. COMMIT 后 undo chain 截断，扫描恢复基线 (~1.6s)
+#   2. 启动后台 updater：BEGIN → 连续 UPDATE val+1 × N 轮 → COMMIT
+#   3. 主脚本紧凑循环测量全表扫描耗时（sleep 2 间隔）
+#   4. 随着 undo chain 增长，SELECT 耗时逐步退化到 ~10s+
+#   5. updater COMMIT 后 undo chain 截断，扫描恢复基线
 #
 # 适用于 GaussDB / OpenGauss（PostgreSQL 无 undo 机制）
 #
@@ -34,7 +34,7 @@ TABLE_NAME="fur_test"
 ROW_COUNT=20000
 DATA_WIDTH=3000
 UPDATE_ROUNDS=35
-SCAN_INTERVAL=5
+MEASURE_GAP=2
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -63,12 +63,12 @@ Options:
     -r ROWS     Number of rows (default: 20000)
     -w WIDTH    Data width in bytes per row (default: 3000)
     -R ROUNDS   Update rounds in long transaction (default: 35)
-    -I INTERVAL Seconds between scan measurements (default: 5)
+    -I GAP      Seconds between scan measurements (default: 2)
 
 Examples:
     $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
     $0 -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
-    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -r 50000 -R 30 -w 3000
+    $0 -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -r 50000 -R 50 -w 3000
 EOF
     exit 1
 }
@@ -111,7 +111,6 @@ set_defaults() {
 build_conn() {
     local extra="$1"
     if [ "$DB_CLIENT" = "gsql" ]; then
-        # gsql: add -v ON_ERROR_STOP=1 to prevent hanging on SQL errors
         local stop="-v ON_ERROR_STOP=1"
         if [ -n "$DB_PASS" ]; then
             echo "gsql ${stop} -h $DB_HOST -p $DB_PORT -U $DB_USER -W '$DB_PASS' -d $DB_NAME $extra"
@@ -119,7 +118,6 @@ build_conn() {
             echo "gsql ${stop} -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra"
         fi
     else
-        # psql: add -v ON_ERROR_STOP=1 to prevent hanging on SQL errors
         local stop="-v ON_ERROR_STOP=1"
         if [ -n "$DB_PASS" ]; then
             local ep=$(url_encode "$DB_PASS")
@@ -190,7 +188,7 @@ while getopts "t:h:p:d:U:W:Vr:w:R:I:" opt; do
         r) ROW_COUNT="$OPTARG" ;;
         w) DATA_WIDTH="$OPTARG" ;;
         R) UPDATE_ROUNDS="$OPTARG" ;;
-        I) SCAN_INTERVAL="$OPTARG" ;;
+        I) MEASURE_GAP="$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -200,8 +198,6 @@ detect_client
 
 RESULT_FILE="/tmp/fur_results_$$.csv"
 UPDATER_SQL="/tmp/fur_updater_$$.sql"
-TMP_DIR="/tmp/fur_tmp_$$"
-mkdir -p "$TMP_DIR"
 
 echo ""
 echo "============================================================"
@@ -211,8 +207,8 @@ echo "Database:      $DB_TYPE ($DB_HOST:$DB_PORT/$DB_NAME)"
 echo "User:          $DB_USER"
 echo "Client:        $DB_CLIENT"
 echo "Table:         $TABLE_NAME (ustore, $ROW_COUNT rows × ${DATA_WIDTH}B)"
-echo "Update rounds: $UPDATE_ROUNDS (in single long transaction, ~10s peak expected)"
-echo "Scan interval: $SCAN_INTERVAL seconds"
+echo "Update rounds: $UPDATE_ROUNDS (continuous, no sleep between UPDATEs)"
+echo "Measure gap:   $MEASURE_GAP seconds"
 echo "============================================================"
 echo ""
 
@@ -228,7 +224,7 @@ if [ "$ENABLE_USTORE" != "on" ]; then
     log_warn "enable_ustore='$ENABLE_USTORE', setting to 'on'..."
     db_exec "ALTER SYSTEM SET enable_ustore = on;"
     db_exec "SELECT pg_reload_conf();"
-    sleep 2
+    sleep 1
 fi
 log_info "  enable_ustore = on"
 
@@ -248,36 +244,33 @@ for i in 1 2 3; do
     MS=$(measure_scan_ms)
     BASELINE_SAMPLES="$BASELINE_SAMPLES $MS"
     log_info "  Sample $i: ${MS}ms"
-    sleep 1
 done
 BASELINE_AVG=$(echo $BASELINE_SAMPLES | awk '{s=0; for(i=1;i<=NF;i++) s+=$i; print int(s/NF)}')
 BASELINE_SEC=$(echo "scale=1; $BASELINE_AVG / 1000" | bc 2>/dev/null || echo "?")
 log_info "  Average baseline: ${BASELINE_AVG}ms (${BASELINE_SEC}s)"
 
-echo "round,scan_ms,baseline_ms,ratio" > "$RESULT_FILE"
+echo "round,elapsed_s,scan_ms,baseline_ms,ratio" > "$RESULT_FILE"
 
 # ── Step 5 ──
 log_step "5/6: Long transaction UPDATE + concurrent scan"
 
 echo ""
 echo -e "${CYAN}  Strategy:${NC}"
-echo -e "${CYAN}    Background session: BEGIN → $UPDATE_ROUNDS UPDATEs → pg_sleep → COMMIT${NC}"
-echo -e "${CYAN}    Main script: measures SELECT * after each UPDATE round${NC}"
-echo -e "${CYAN}    Expected: scan time grows from ~${BASELINE_SEC}s to ~10s${NC}"
+echo -e "${CYAN}    Updater: BEGIN → $UPDATE_ROUNDS continuous UPDATEs → COMMIT${NC}"
+echo -e "${CYAN}    Main: measure SELECT * every $MEASURE_GAP seconds until updater exits${NC}"
+echo -e "${CYAN}    Expected: scan grows from ~${BASELINE_SEC}s to ~10s, then recovers${NC}"
 echo ""
 
-# Build updater SQL
+# Build updater SQL — continuous UPDATEs, no pg_sleep
 {
     echo "BEGIN;"
     for R in $(seq 1 $UPDATE_ROUNDS); do
         echo "UPDATE $TABLE_NAME SET val = val + 1;"
-        echo "SELECT pg_sleep($SCAN_INTERVAL);"
     done
-    echo "SELECT pg_sleep(10);"
     echo "COMMIT;"
 } > "$UPDATER_SQL"
 
-UPDATER_TIMEOUT=$(( UPDATE_ROUNDS * SCAN_INTERVAL * 4 + 120 ))
+UPDATER_TIMEOUT=$(( UPDATE_ROUNDS * 30 + 120 ))
 
 log_info "  Starting updater (timeout: ${UPDATER_TIMEOUT}s)"
 
@@ -294,44 +287,46 @@ fi
 UPDATER_PID=$!
 log_info "  Updater PID: $UPDATER_PID"
 
-# Wait for first UPDATE + first pg_sleep
-sleep $((SCAN_INTERVAL + 2))
+# Brief wait for updater to start transaction
+sleep 2
+
+TEST_START_S=$(date +%s)
 
 echo ""
 
-for ROUND in $(seq 1 $UPDATE_ROUNDS); do
-    # Measure
+MEASURE_NUM=0
+while true; do
+    MEASURE_NUM=$((MEASURE_NUM + 1))
+
+    # Measure scan
     SCAN_MS=$(measure_scan_ms)
     SCAN_SEC=$(echo "scale=1; $SCAN_MS / 1000" | bc 2>/dev/null || echo "?")
     RATIO=$(echo "scale=1; $SCAN_MS / $BASELINE_AVG" | bc 2>/dev/null || echo "?")
+    ELAPSED=$(( $(date +%s) - TEST_START_S ))
 
     # Check updater after measurement
     if ! kill -0 "$UPDATER_PID" 2>/dev/null; then
-        echo -e "  ${GREEN}Round $ROUND (COMMITTED)${NC}: scan=${SCAN_MS}ms (${SCAN_SEC}s) | base=${BASELINE_AVG}ms (${BASELINE_SEC}s) | ${RATIO}x"
-        echo "$ROUND,$SCAN_MS,$BASELINE_AVG,$RATIO" >> "$RESULT_FILE"
-        log_info "  Updater COMMITTED — undo chains truncated, scan recovering"
+        echo -e "  ${GREEN}#$MEASURE_NUM (COMMITTED, ${ELAPSED}s)${NC}: scan=${SCAN_MS}ms (${SCAN_SEC}s) | base=${BASELINE_AVG}ms (${BASELINE_SEC}s) | ${RATIO}x"
+        echo "$MEASURE_NUM,$ELAPSED,$SCAN_MS,$BASELINE_AVG,$RATIO" >> "$RESULT_FILE"
+        log_info "  Updater COMMITTED at elapsed ${ELAPSED}s — undo chains truncated"
         break
     fi
 
-    echo -e "  ${CYAN}Round $ROUND/$UPDATE_ROUNDS${NC}: scan=${SCAN_MS}ms (${SCAN_SEC}s) | base=${BASELINE_AVG}ms (${BASELINE_SEC}s) | ${RATIO}x"
-    echo "$ROUND,$SCAN_MS,$BASELINE_AVG,$RATIO" >> "$RESULT_FILE"
+    echo -e "  ${CYAN}#$MEASURE_NUM${NC} (${ELAPSED}s): scan=${SCAN_MS}ms (${SCAN_SEC}s) | base=${BASELINE_AVG}ms (${BASELINE_SEC}s) | ${RATIO}x"
+    echo "$MEASURE_NUM,$ELAPSED,$SCAN_MS,$BASELINE_AVG,$RATIO" >> "$RESULT_FILE"
 
-    sleep "$SCAN_INTERVAL"
+    sleep "$MEASURE_GAP"
 done
 
-# Wait for updater COMMIT
-log_info "  Waiting for updater COMMIT..."
-wait "$UPDATER_PID" 2>/dev/null
-sleep 5
-
+# Post-commit measurement
+sleep 3
 POST_MS=$(measure_scan_ms)
 POST_SEC=$(echo "scale=1; $POST_MS / 1000" | bc 2>/dev/null || echo "?")
 POST_RATIO=$(echo "scale=1; $POST_MS / $BASELINE_AVG" | bc 2>/dev/null || echo "?")
 log_info "  Post-commit: ${POST_MS}ms (${POST_SEC}s, ${POST_RATIO}x baseline)"
 
-# Wait for undo cleanup
-log_info "  Waiting 15s for undo cleanup..."
-sleep 15
+# Brief wait for undo cleanup
+sleep 5
 CLEANUP_MS=$(measure_scan_ms)
 CLEANUP_SEC=$(echo "scale=1; $CLEANUP_MS / 1000" | bc 2>/dev/null || echo "?")
 CLEANUP_RATIO=$(echo "scale=1; $CLEANUP_MS / $BASELINE_AVG" | bc 2>/dev/null || echo "?")
@@ -339,11 +334,6 @@ log_info "  After cleanup: ${CLEANUP_MS}ms (${CLEANUP_SEC}s, ${CLEANUP_RATIO}x b
 
 # ── Step 6 ──
 log_step "6/6: Checking wait events"
-
-# Detect available wait event infrastructure (GaussDB/OpenGauss differ)
-# 1) Check if pg_thread_wait_status view exists and what columns it has
-# 2) Check if pg_stat_activity has wait_event column
-# 3) Build queries dynamically based on what's available
 
 HAS_THREAD_WAIT=$(db_query "
     SELECT count(*) FROM information_schema.views
@@ -368,7 +358,6 @@ PG_STAT_WAIT_COLS=$(db_query "
 
 echo ""
 if echo "$WAIT_EVENT_COLS" | grep -q 'wait_event'; then
-    # OpenGauss: pg_thread_wait_status has wait_event column
     DB_FILTER=""
     if echo "$WAIT_EVENT_COLS" | grep -q 'db_name'; then
         DB_FILTER="AND db_name = '$DB_NAME'"
@@ -393,7 +382,6 @@ if echo "$WAIT_EVENT_COLS" | grep -q 'wait_event'; then
         ORDER BY count(*) DESC;
     " | head -5
 elif echo "$PG_STAT_WAIT_COLS" | grep -q 'wait_event'; then
-    # GaussDB/PostgreSQL: pg_stat_activity has wait_event column
     echo -e "${CYAN}  Undo-related wait events (pg_stat_activity):${NC}"
     db_query "
         SELECT wait_event_type, wait_event, count(*)
@@ -413,7 +401,6 @@ elif echo "$PG_STAT_WAIT_COLS" | grep -q 'wait_event'; then
         ORDER BY count(*) DESC;
     " | head -5
 elif echo "$PG_STAT_WAIT_COLS" | grep -q 'waiting'; then
-    # OpenGauss/GaussDB: pg_stat_activity has only 'waiting' boolean
     echo -e "${CYAN}  Blocking sessions (pg_stat_activity.waiting):${NC}"
     db_query "
         SELECT pid, usename, state, waiting, left(query, 80)
@@ -450,32 +437,32 @@ echo ""
 
 echo -e "${CYAN}  Scan time trend (baseline → peak → recovery):${NC}"
 echo ""
-printf "  %-8s %-12s %-10s %-8s\n" "Round" "Scan(ms)" "Scan(s)" "Ratio"
-printf "  %-8s %-12s %-10s %-8s\n" "------" "--------" "------" "------"
-printf "  %-8s %-12s %-10s %-8s\n" "base" "${BASELINE_AVG}" "${BASELINE_SEC}" "1.0x"
+printf "  %-6s %-8s %-12s %-10s %-8s\n" "#" "Elapsed" "Scan(ms)" "Scan(s)" "Ratio"
+printf "  %-6s %-8s %-12s %-10s %-8s\n" "---" "------" "--------" "------" "------"
+printf "  %-6s %-8s %-12s %-10s %-8s\n" "base" "0s" "${BASELINE_AVG}" "${BASELINE_SEC}" "1.0x"
 
-while IFS=',' read -r round scan base ratio; do
-    [ "$round" = "round" ] && continue
+while IFS=',' read -r num elapsed scan base ratio; do
+    [ "$num" = "round" ] && continue
     sec=$(echo "scale=1; $scan / 1000" | bc 2>/dev/null || echo "?")
-    printf "  %-8s %-12s %-10s %-8s\n" "$round" "$scan" "$sec" "${ratio}x"
+    printf "  %-6s %-8s %-12s %-10s %-8s\n" "#$num" "${elapsed}s" "$scan" "$sec" "${ratio}x"
 done < "$RESULT_FILE"
 
-printf "  %-8s %-12s %-10s %-8s\n" "commit" "$POST_MS" "$POST_SEC" "${POST_RATIO}x"
-printf "  %-8s %-12s %-10s %-8s\n" "cleanup" "$CLEANUP_MS" "$CLEANUP_SEC" "${CLEANUP_RATIO}x"
+printf "  %-6s %-8s %-12s %-10s %-8s\n" "commit" "" "$POST_MS" "$POST_SEC" "${POST_RATIO}x"
+printf "  %-6s %-8s %-12s %-10s %-8s\n" "clean" "" "$CLEANUP_MS" "$CLEANUP_SEC" "${CLEANUP_RATIO}x"
 
-PEAK_SCAN=$(grep -v "^round" "$RESULT_FILE" | cut -d',' -f2 | sort -n | tail -1)
-PEAK_ROUND=$(grep -v "^round" "$RESULT_FILE" | awk -F',' -v peak="$PEAK_SCAN" '$2 == peak {print $1}')
+PEAK_SCAN=$(grep -v "^round" "$RESULT_FILE" | cut -d',' -f3 | sort -n | tail -1)
+PEAK_NUM=$(grep -v "^round" "$RESULT_FILE" | awk -F',' -v peak="$PEAK_SCAN" '$3 == peak {print $1}')
+PEAK_ELAPSED=$(grep -v "^round" "$RESULT_FILE" | awk -F',' -v peak="$PEAK_SCAN" '$3 == peak {print $2}')
 if [ -n "$PEAK_SCAN" ] && [ "$PEAK_SCAN" -gt "$((BASELINE_AVG * 2))" ]; then
     PEAK_SEC=$(echo "scale=1; $PEAK_SCAN / 1000" | bc 2>/dev/null || echo "?")
     PEAK_RATIO=$(echo "scale=1; $PEAK_SCAN / $BASELINE_AVG" | bc 2>/dev/null || echo "?")
     echo ""
-    log_info "SUCCESS: Scan degraded from ${BASELINE_AVG}ms (${BASELINE_SEC}s) → ${PEAK_SCAN}ms (${PEAK_SEC}s) at round ${PEAK_ROUND}"
+    log_info "SUCCESS: Scan degraded from ${BASELINE_AVG}ms (${BASELINE_SEC}s) → ${PEAK_SCAN}ms (${PEAK_SEC}s) at #${PEAK_NUM} (elapsed ${PEAK_ELAPSED}s)"
     log_info "  Peak ratio: ${PEAK_RATIO}x baseline"
     log_info "  Root cause: long-txn UPDATE extends undo chain →"
     log_info "  SELECT traverses undo chain for consistent read →"
     log_info "  'fetch undo record' wait, scan time increases"
     if [ "$CLEANUP_MS" -lt "$PEAK_SCAN" ]; then
-        CLEANUP_SEC=$(echo "scale=1; $CLEANUP_MS / 1000" | bc 2>/dev/null || echo "?")
         log_info "  After undo cleanup: recovered to ${CLEANUP_MS}ms (${CLEANUP_SEC}s)"
     fi
 else
@@ -485,4 +472,3 @@ else
 fi
 
 rm -f "$UPDATER_SQL" "$RESULT_FILE"
-rm -rf "$TMP_DIR"
