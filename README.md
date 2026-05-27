@@ -94,3 +94,20 @@ OpenGauss/GaussDB UStore undo 回收测试，复现 "snapshot is stale" 报错�
 - **普通 SELECT**（回退）：检测 MVCC 静默损坏（返回当前值而非快照值）
 
 OpenGauss 6.0 的行为：undo_snapshot_stale_check=on 时游标路径可报错；普通 SELECT 不走 stale check，静默返回错误数据。
+
+## fetch undo record 测试
+
+OpenGauss/GaussDB Ustore "fetch undo record" 等待事件复现，演示长事务导致查询性能退化：
+
+```bash
+# OpenGauss
+./fetch-undo-record/test_fetch_undo_record.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123'
+
+# GaussDB
+./fetch-undo-record/test_fetch_undo_record.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
+
+# 更多行数和更新轮次以增强效果
+./fetch-undo-record/test_fetch_undo_record.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -r 10000 -R 50 -C 4 -I 5
+```
+
+原理：Ustore 引擎采用 undo-based MVCC，每次 UPDATE 产生 undo record 形成 undo chain。一个长事务不断更新同一批行时，undo chain 越来越长，其他会话全表扫描必须沿 undo chain 逐条 fetch undo record 重构一致读视图，导致查询逐步变慢并出现 "fetch undo record" 等待事件。COMMIT 后 undo chain 截断，扫描性能恢复。

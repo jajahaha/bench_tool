@@ -1,5 +1,14 @@
 # db_shell_bench Release Note
 
+## v4 (2026-05-27)
+
+### 新增功能
+
+- **fetch undo record 等待事件复现** — 新增 fetch-undo-record 目录，端到端复现 OpenGauss/GaussDB Ustore "fetch undo record" 等待事件导致的查询性能退化
+  - 长事务持续 UPDATE 扩展 undo chain，并发全表扫描必须遍历 undo chain 获取一致读
+  - 每轮测量扫描耗时，展示从基线到逐步退化的趋势
+  - 检测 pg_stat_activity 和 dbe_perf.wait_events 中的 "fetch undo record" 事件
+
 ## v3 (2026-05-26)
 
 ### 新增功能
