@@ -75,6 +75,11 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${BLUE}[STEP]${NC} $1"; }
+log_sql_err() {
+    local caller_fn="$1" caller_line="$2" err_msg="$3" sql="$4"
+    echo -e "${RED}[SQL ERROR]${NC} ${caller_fn}() line ${caller_line}: ${err_msg}"
+    echo -e "${RED}[SQL]${NC} ${sql}"
+}
 
 url_encode() {
     printf '%s' "$1" | sed 's/@/%40/g; s/:/%3A/g; s/\//%2F/g; s/#/%23/g; s/\?/%3F/g; s/&/%26/g; s/=/%3D/g; s/ /%20/g'
@@ -104,31 +109,54 @@ set_defaults() {
 build_conn() {
     local extra="$1"
     if [ "$DB_CLIENT" = "gsql" ]; then
+        # gsql: add -v ON_ERROR_STOP=1 to prevent hanging on SQL errors
+        local stop="-v ON_ERROR_STOP=1"
         if [ -n "$DB_PASS" ]; then
-            echo "gsql -h $DB_HOST -p $DB_PORT -U $DB_USER -W '$DB_PASS' -d $DB_NAME $extra"
+            echo "gsql ${stop} -h $DB_HOST -p $DB_PORT -U $DB_USER -W '$DB_PASS' -d $DB_NAME $extra"
         else
-            echo "gsql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra"
+            echo "gsql ${stop} -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra"
         fi
     else
+        # psql: add -v ON_ERROR_STOP=1 to prevent hanging on SQL errors
+        local stop="-v ON_ERROR_STOP=1"
         if [ -n "$DB_PASS" ]; then
             local ep=$(url_encode "$DB_PASS")
-            echo "psql postgresql://${DB_USER}:${ep}@${DB_HOST}:${DB_PORT}/${DB_NAME} $extra"
+            echo "psql ${stop} postgresql://${DB_USER}:${ep}@${DB_HOST}:${DB_PORT}/${DB_NAME} $extra"
         else
-            echo "psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra"
+            echo "psql ${stop} -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME $extra"
         fi
     fi
 }
 
+# Execute SQL silently; capture and report errors with line context
 db_exec() {
     local sql="$1"
-    eval "$(build_conn "-q -c \"$sql\"")" 2>&1 \
-        | grep -v "^ALTER\|^pg_reload\|^SET\|^DROP\|^CREATE\|^INSERT\|^NOTICE\|^gsql:\|^DO\|^Password\|^You\|^Line\|^UPDATE" || true
+    local err_file="/tmp/fur_exec_err_$$_${BASH_LINENO[0]}"
+    eval "$(build_conn "-q -c \"$sql\"")" > /dev/null 2>"$err_file"
+    if [ -s "$err_file" ]; then
+        local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^ALTER\|^SET\|^pg_reload\|^DO\|^gsql:" "$err_file" 2>/dev/null)
+        if [ -n "$err_msg" ]; then
+            log_sql_err "db_exec" "${BASH_LINENO[0]}" "$err_msg" "$sql"
+        fi
+    fi
+    rm -f "$err_file"
 }
 
+# Query SQL, return stdout; capture and report errors with line context
 db_query() {
     local sql="$1"
-    eval "$(build_conn "-t -A -c \"$sql\"")" 2>&1 \
-        | grep -v "^Password\|^You\|^Line\|^gsql:" || true
+    local out_file="/tmp/fur_query_out_$$_${BASH_LINENO[0]}"
+    local err_file="/tmp/fur_query_err_$$_${BASH_LINENO[0]}"
+    eval "$(build_conn "-t -A -c \"$sql\"")" > "$out_file" 2>"$err_file"
+    if [ -s "$err_file" ]; then
+        local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^gsql:" "$err_file" 2>/dev/null)
+        if [ -n "$err_msg" ]; then
+            log_sql_err "db_query" "${BASH_LINENO[0]}" "$err_msg" "$sql"
+        fi
+    fi
+    rm -f "$err_file"
+    cat "$out_file" | grep -v "^Password\|^You\|^Line\|^gsql:"
+    rm -f "$out_file"
 }
 
 measure_scan_ms() {
@@ -161,6 +189,8 @@ detect_client
 
 RESULT_FILE="/tmp/fur_results_$$.csv"
 UPDATER_SQL="/tmp/fur_updater_$$.sql"
+TMP_DIR="/tmp/fur_tmp_$$"
+mkdir -p "$TMP_DIR"
 
 echo ""
 echo "============================================================"
@@ -188,7 +218,7 @@ if [ "$ENABLE_USTORE" != "on" ]; then
     db_exec "ALTER SYSTEM SET enable_ustore = on; SELECT pg_reload_conf();"
     sleep 2
 fi
-log_info "  enable_ustore = $ENABLE_USTORE"
+log_info "  enable_ustore = on"
 
 # ── Step 3 ──
 log_step "3/6: Creating ustore test table ($ROW_COUNT rows × ${DATA_WIDTH}B)"
@@ -241,13 +271,13 @@ log_info "  Starting updater (timeout: ${UPDATER_TIMEOUT}s)"
 
 if [ "$DB_CLIENT" = "gsql" ]; then
     if [ -n "$DB_PASS" ]; then
-        timeout "$UPDATER_TIMEOUT" gsql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -W "$DB_PASS" -d "$DB_NAME" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
+        timeout "$UPDATER_TIMEOUT" gsql -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -W "$DB_PASS" -d "$DB_NAME" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
     else
-        timeout "$UPDATER_TIMEOUT" gsql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
+        timeout "$UPDATER_TIMEOUT" gsql -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
     fi
 else
     local_ep=$(url_encode "${DB_PASS}")
-    timeout "$UPDATER_TIMEOUT" psql "postgresql://${DB_USER}:${local_ep}@${DB_HOST}:${DB_PORT}/${DB_NAME}" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
+    timeout "$UPDATER_TIMEOUT" psql -v ON_ERROR_STOP=1 "postgresql://${DB_USER}:${local_ep}@${DB_HOST}:${DB_PORT}/${DB_NAME}" -q -f "$UPDATER_SQL" > /dev/null 2>&1 &
 fi
 UPDATER_PID=$!
 log_info "  Updater PID: $UPDATER_PID"
@@ -298,20 +328,38 @@ log_info "  After cleanup: ${CLEANUP_MS}ms (${CLEANUP_SEC}s, ${CLEANUP_RATIO}x b
 # ── Step 6 ──
 log_step "6/6: Checking wait events"
 
-# Detect available wait event columns (GaussDB/OpenGauss have different schemas)
-WAIT_COLS=$(db_query "
-    SELECT column_name FROM information_schema.columns
-    WHERE table_name = 'pg_thread_wait_status'
-    ORDER BY ordinal_position;
-" 2>/dev/null | tr '\n' ',')
+# Detect available wait event infrastructure (GaussDB/OpenGauss differ)
+# 1) Check if pg_thread_wait_status view exists and what columns it has
+# 2) Check if pg_stat_activity has wait_event column
+# 3) Build queries dynamically based on what's available
+
+HAS_THREAD_WAIT=$(db_query "
+    SELECT count(*) FROM information_schema.views
+    WHERE table_name = 'pg_thread_wait_status';
+" | head -1 | tr -d ' ')
+
+WAIT_EVENT_COLS=""
+if [ "$HAS_THREAD_WAIT" -gt 0 ] 2>/dev/null; then
+    WAIT_EVENT_COLS=$(db_query "
+        SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+        FROM information_schema.columns
+        WHERE table_name = 'pg_thread_wait_status';
+    " | head -1 | tr -d ' ')
+fi
+
+PG_STAT_WAIT_COLS=$(db_query "
+    SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+    FROM information_schema.columns
+    WHERE table_name = 'pg_stat_activity'
+      AND column_name IN ('wait_event', 'wait_event_type', 'waiting', 'wait_status');
+" | head -1 | tr -d ' ')
 
 echo ""
-if echo "$WAIT_COLS" | grep -q 'wait_event'; then
-    # OpenGauss: has wait_event + db_name columns
-    if echo "$WAIT_COLS" | grep -q 'db_name'; then
+if echo "$WAIT_EVENT_COLS" | grep -q 'wait_event'; then
+    # OpenGauss: pg_thread_wait_status has wait_event column
+    DB_FILTER=""
+    if echo "$WAIT_EVENT_COLS" | grep -q 'db_name'; then
         DB_FILTER="AND db_name = '$DB_NAME'"
-    else
-        DB_FILTER=""
     fi
     echo -e "${CYAN}  Undo-related wait events (pg_thread_wait_status):${NC}"
     db_query "
@@ -320,7 +368,7 @@ if echo "$WAIT_COLS" | grep -q 'wait_event'; then
         WHERE wait_event LIKE '%undo%'
           $DB_FILTER
         GROUP BY wait_event;
-    " 2>/dev/null | head -5
+    " | head -5
 
     echo ""
     echo -e "${CYAN}  Non-none wait events (pg_thread_wait_status):${NC}"
@@ -331,32 +379,55 @@ if echo "$WAIT_COLS" | grep -q 'wait_event'; then
           $DB_FILTER
         GROUP BY wait_status, wait_event
         ORDER BY count(*) DESC;
-    " 2>/dev/null | head -5
-else
-    # GaussDB or version without wait_event column: try alternative views
+    " | head -5
+elif echo "$PG_STAT_WAIT_COLS" | grep -q 'wait_event'; then
+    # GaussDB/PostgreSQL: pg_stat_activity has wait_event column
     echo -e "${CYAN}  Undo-related wait events (pg_stat_activity):${NC}"
     db_query "
         SELECT wait_event_type, wait_event, count(*)
         FROM pg_stat_activity
         WHERE wait_event LIKE '%undo%'
         GROUP BY wait_event_type, wait_event;
-    " 2>/dev/null | head -5
+    " | head -5
 
-    # Fallback: just check blocking sessions
-    if [ $? -ne 0 ] || [ -z "$(db_query "SELECT count(*) FROM pg_stat_activity WHERE waiting = true;" 2>/dev/null)" ]; then
-        echo -e "${CYAN}  Active blocking sessions (pg_stat_activity.waiting):${NC}"
-        db_query "
-            SELECT pid, usename, state, waiting, query
-            FROM pg_stat_activity
-            WHERE state IN ('active', 'idle in transaction')
-              AND pid != pg_backend_pid()
-            ORDER BY state_change;
-        " 2>/dev/null | head -5
-    fi
+    echo ""
+    echo -e "${CYAN}  Active wait events (pg_stat_activity):${NC}"
+    db_query "
+        SELECT wait_event_type, wait_event, count(*)
+        FROM pg_stat_activity
+        WHERE pid != pg_backend_pid()
+          AND state = 'active'
+        GROUP BY wait_event_type, wait_event
+        ORDER BY count(*) DESC;
+    " | head -5
+elif echo "$PG_STAT_WAIT_COLS" | grep -q 'waiting'; then
+    # OpenGauss/GaussDB: pg_stat_activity has only 'waiting' boolean
+    echo -e "${CYAN}  Blocking sessions (pg_stat_activity.waiting):${NC}"
+    db_query "
+        SELECT pid, usename, state, waiting, left(query, 80)
+        FROM pg_stat_activity
+        WHERE waiting = true
+          AND pid != pg_backend_pid()
+        ORDER BY state_change;
+    " | head -5
+
+    echo ""
+    echo -e "${CYAN}  Active sessions (pg_stat_activity):${NC}"
+    db_query "
+        SELECT pid, usename, state, left(query, 80)
+        FROM pg_stat_activity
+        WHERE state IN ('active', 'idle in transaction')
+          AND pid != pg_backend_pid()
+        ORDER BY state_change;
+    " | head -5
+else
+    echo -e "${YELLOW}  No wait event view available for this database version.${NC}"
+    echo -e "${YELLOW}  pg_thread_wait_status columns: ${WAIT_EVENT_COLS:-N/A}${NC}"
+    echo -e "${YELLOW}  pg_stat_activity wait columns: ${PG_STAT_WAIT_COLS:-N/A}${NC}"
 fi
 
 # ── Cleanup ──
-db_exec "DROP TABLE IF EXISTS $TABLE_NAME CASCADE;" 2>/dev/null
+db_exec "DROP TABLE IF EXISTS $TABLE_NAME CASCADE;"
 
 # ── Summary ──
 echo ""
@@ -401,4 +472,5 @@ else
     log_warn "Try: increase -R (rounds), -r (rows), or -w (data width)"
 fi
 
-rm -f "$UPDATER_SQL"
+rm -f "$UPDATER_SQL" "$RESULT_FILE"
+rm -rf "$TMP_DIR"

@@ -83,11 +83,20 @@ opengauss/gaussdb 类型自动检测客户端：
 
 ## 等待事件检测
 
-脚本自动适配不同数据库版本的等待事件视图：
+脚本自动检测可用的等待事件视图，按优先级尝试：
 
-- **OpenGauss**：查询 `pg_thread_wait_status`（有 `wait_event` 和 `db_name` 列）
-- **GaussDB**：若 `pg_thread_wait_status` 无 `wait_event` 列，回退到 `pg_stat_activity` 查询
-- 两种方式均检测 undo 相关等待事件和活跃阻塞会话
+1. **`pg_thread_wait_status`（有 `wait_event` 列）** — OpenGauss 优先使用，查询 undo 相关等待和非 none 等待
+2. **`pg_stat_activity`（有 `wait_event` 列）** — GaussDB/PostgreSQL 回退，查询 undo 和活跃等待事件
+3. **`pg_stat_activity`（仅 `waiting` 列）** — OpenGauss/GaussDB 最简回退，查询阻塞会话
+4. **无可用视图** — 显示检测到的列结构信息，不报错不卡死
+
+所有 SQL 查询遇到错误时，显示函数名、行号和出错 SQL，不会卡死。
+
+## 错误处理
+
+- psql/gsql 添加 `ON_ERROR_STOP=1`，遇到 SQL 错误立即退出，不会卡死在交互模式
+- `db_exec`/`db_query` 分离 stdout 和 stderr，错误信息带函数名和行号
+- 等待事件检测不依赖任何固定列名，全部动态探测
 
 ## 注意事项
 
