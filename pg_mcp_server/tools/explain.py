@@ -2,9 +2,8 @@
 
 from typing import Annotated
 from pydantic import Field
-from psycopg.rows import dict_row
 
-from pg_mcp_server.db import format_as_markdown_table, format_as_text
+from pg_mcp_server.db import format_as_markdown_table
 
 
 def register(mcp):
@@ -71,7 +70,7 @@ def register(mcp):
         """Get pg_stats statistics for a table/column. Shows n_distinct, correlation, null_frac, MCV, histogram_bounds — key inputs to the query planner."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 if column_name:
                     rows = conn.execute(
                         """

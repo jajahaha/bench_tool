@@ -2,9 +2,8 @@
 
 from typing import Annotated
 from pydantic import Field
-from psycopg.rows import dict_row
 
-from pg_mcp_server.db import format_as_markdown_table, format_as_text
+from pg_mcp_server.db import format_as_markdown_table
 
 
 def register(mcp):
@@ -15,7 +14,7 @@ def register(mcp):
         """Get currently running queries from pg_stat_activity. Shows query text, state, duration, and client info."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT
@@ -47,7 +46,7 @@ def register(mcp):
         """Find slow queries from pg_stat_statements. Requires pg_stat_statements extension to be enabled."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 # Check if pg_stat_statements is available
                 ext = conn.execute(
                     "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'"
@@ -84,7 +83,7 @@ def register(mcp):
         """Find sessions waiting for locks and the sessions blocking them. Shows lock type, relation, and blocking query."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT
@@ -124,7 +123,7 @@ def register(mcp):
         """Get connection statistics grouped by state and application_name."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT
@@ -148,7 +147,7 @@ def register(mcp):
         """Get disk size for all databases."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT

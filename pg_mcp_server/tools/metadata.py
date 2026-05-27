@@ -2,8 +2,6 @@
 
 from typing import Annotated
 from pydantic import Field
-from psycopg.rows import dict_row
-from psycopg.sql import Identifier, SQL
 
 from pg_mcp_server.db import format_as_markdown_table
 
@@ -18,14 +16,14 @@ def register(mcp):
         """List all tables in a schema."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
-                    SQL("""
+                    """
                     SELECT table_name, table_type
                     FROM information_schema.tables
                     WHERE table_schema = %s
                     ORDER BY table_name
-                    """),
+                    """,
                     [schema],
                 ).fetchall()
                 return format_as_markdown_table(rows)
@@ -40,38 +38,35 @@ def register(mcp):
         """Get detailed table structure: columns, indexes, constraints, and partition info."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
-                # Columns
+            with pool.connection() as conn:
                 cols = conn.execute(
-                    SQL("""
+                    """
                     SELECT column_name, data_type, character_maximum_length,
                            is_nullable, column_default, numeric_precision, numeric_scale
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
-                    """),
+                    """,
                     [schema, table_name],
                 ).fetchall()
 
-                # Indexes
                 idxs = conn.execute(
-                    SQL("""
+                    """
                     SELECT indexname, indexdef
                     FROM pg_indexes
                     WHERE schemaname = %s AND tablename = %s
-                    """),
+                    """,
                     [schema, table_name],
                 ).fetchall()
 
-                # Constraints
                 constrs = conn.execute(
-                    SQL("""
+                    """
                     SELECT conname, contype, pg_get_constraintdef(c.oid) AS definition
                     FROM pg_constraint c
                     JOIN pg_class t ON c.conrelid = t.oid
                     JOIN pg_namespace n ON t.relnamespace = n.oid
                     WHERE n.nspname = %s AND t.relname = %s
-                    """),
+                    """,
                     [schema, table_name],
                 ).fetchall()
 
@@ -96,24 +91,24 @@ def register(mcp):
         """List indexes for a specific table or all tables in a schema."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 if table_name:
                     rows = conn.execute(
-                        SQL("""
+                        """
                         SELECT indexname, indexdef
                         FROM pg_indexes
                         WHERE schemaname = %s AND tablename = %s
-                        """),
+                        """,
                         [schema, table_name],
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        SQL("""
+                        """
                         SELECT tablename, indexname, indexdef
                         FROM pg_indexes
                         WHERE schemaname = %s
                         ORDER BY tablename, indexname
-                        """),
+                        """,
                         [schema],
                     ).fetchall()
                 return format_as_markdown_table(rows)
@@ -125,7 +120,7 @@ def register(mcp):
         """List all schemas in the database."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT schema_name, schema_owner
@@ -146,9 +141,9 @@ def register(mcp):
         """Get table statistics: row count, disk size, last analyze time, dead tuples."""
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 rows = conn.execute(
-                    SQL("""
+                    """
                     SELECT
                         relname AS table_name,
                         n_live_tup AS live_rows,
@@ -161,17 +156,17 @@ def register(mcp):
                         analyze_count
                     FROM pg_stat_user_tables
                     WHERE schemaname = %s AND relname = %s
-                    """),
+                    """,
                     [schema, table_name],
                 ).fetchall()
 
                 size_rows = conn.execute(
-                    SQL("""
+                    """
                     SELECT
                         pg_relation_size(%s || '.' || %s) AS table_bytes,
                         pg_indexes_size(%s || '.' || %s) AS index_bytes,
                         pg_total_relation_size(%s || '.' || %s) AS total_bytes
-                    """),
+                    """,
                     [schema, table_name, schema, table_name, schema, table_name],
                 ).fetchall()
 
@@ -181,7 +176,7 @@ def register(mcp):
                         tb = int(r["table_bytes"] or 0)
                         ib = int(r["index_bytes"] or 0)
                         tot = int(r["total_bytes"] or 0)
-                        result += f"## Disk Size\n| Type | Size |\n|---|---|\n"
+                        result += "## Disk Size\n| Type | Size |\n|---|---|\n"
                         result += f"| Table data | {tb / 1024:.1f} KB |\n"
                         result += f"| Indexes | {ib / 1024:.1f} KB |\n"
                         result += f"| Total | {tot / 1024:.1f} KB |\n"

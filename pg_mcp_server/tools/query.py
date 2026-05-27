@@ -2,7 +2,6 @@
 
 from typing import Annotated
 from pydantic import Field
-from psycopg.rows import dict_row
 
 from pg_mcp_server.db import (
     is_read_query, is_dml_query, format_as_markdown_table, format_as_text,
@@ -24,7 +23,7 @@ def register(mcp):
 
         pool = mcp._lifespan_context["db_pool"]
         try:
-            with pool.connection(row_factory=dict_row) as conn:
+            with pool.connection() as conn:
                 # Add LIMIT if not already present and it's a SELECT
                 stripped = sql.strip()
                 if stripped.upper().startswith("SELECT") and "LIMIT" not in stripped.upper():

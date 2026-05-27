@@ -22,8 +22,14 @@ def build_conninfo() -> str:
 
 
 def create_pool(min_size: int = 2, max_size: int = 10) -> ConnectionPool:
-    """Create a connection pool."""
-    return ConnectionPool(conninfo=build_conninfo(), min_size=min_size, max_size=max_size, open=True)
+    """Create a connection pool with dict_row as default row factory."""
+    return ConnectionPool(
+        conninfo=build_conninfo(),
+        min_size=min_size,
+        max_size=max_size,
+        kwargs={"row_factory": dict_row},
+        open=True,
+    )
 
 
 def is_read_query(sql: str) -> bool:
