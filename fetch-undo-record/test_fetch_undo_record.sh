@@ -29,6 +29,7 @@ DB_NAME="postgres"
 DB_USER=""
 DB_PASS=""
 DB_CLIENT=""
+VERBOSE=0
 TABLE_NAME="fur_test"
 ROW_COUNT=20000
 DATA_WIDTH=3000
@@ -58,6 +59,7 @@ Options:
     -d DB       Database name (default: postgres)
     -U USER     Database user (default: root for gaussdb, gaussdb for opengauss)
     -W PASS     Database password
+    -V           Verbose: print each SQL statement before execution
     -r ROWS     Number of rows (default: 20000)
     -w WIDTH    Data width in bytes per row (default: 3000)
     -R ROUNDS   Update rounds in long transaction (default: 35)
@@ -131,12 +133,16 @@ build_conn() {
 # Execute SQL silently; capture and report errors with line context
 db_exec() {
     local sql="$1"
-    local err_file="/tmp/fur_exec_err_$$_${BASH_LINENO[0]}"
+    local caller_line="${BASH_LINENO[0]}"
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo -e "${CYAN}[SQL]${NC} db_exec (line $caller_line): $sql" >&2
+    fi
+    local err_file="/tmp/fur_exec_err_$$_${caller_line}"
     eval "$(build_conn "-q -c \"$sql\"")" > /dev/null 2>"$err_file"
     if [ -s "$err_file" ]; then
         local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^ALTER\|^SET\|^pg_reload\|^DO\|^gsql:" "$err_file" 2>/dev/null)
         if [ -n "$err_msg" ]; then
-            log_sql_err "db_exec" "${BASH_LINENO[0]}" "$err_msg" "$sql"
+            log_sql_err "db_exec" "$caller_line" "$err_msg" "$sql"
         fi
     fi
     rm -f "$err_file"
@@ -145,13 +151,17 @@ db_exec() {
 # Query SQL, return stdout; capture and report errors with line context
 db_query() {
     local sql="$1"
-    local out_file="/tmp/fur_query_out_$$_${BASH_LINENO[0]}"
-    local err_file="/tmp/fur_query_err_$$_${BASH_LINENO[0]}"
+    local caller_line="${BASH_LINENO[0]}"
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo -e "${CYAN}[SQL]${NC} db_query (line $caller_line): $sql" >&2
+    fi
+    local out_file="/tmp/fur_query_out_$$_${caller_line}"
+    local err_file="/tmp/fur_query_err_$$_${caller_line}"
     eval "$(build_conn "-t -A -c \"$sql\"")" > "$out_file" 2>"$err_file"
     if [ -s "$err_file" ]; then
         local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^gsql:" "$err_file" 2>/dev/null)
         if [ -n "$err_msg" ]; then
-            log_sql_err "db_query" "${BASH_LINENO[0]}" "$err_msg" "$sql"
+            log_sql_err "db_query" "$caller_line" "$err_msg" "$sql"
         fi
     fi
     rm -f "$err_file"
@@ -168,7 +178,7 @@ measure_scan_ms() {
     echo "$elapsed_ms"
 }
 
-while getopts "t:h:p:d:U:W:r:w:R:I:" opt; do
+while getopts "t:h:p:d:U:W:Vr:w:R:I:" opt; do
     case $opt in
         t) DB_TYPE="$OPTARG" ;;
         h) DB_HOST="$OPTARG" ;;
@@ -176,6 +186,7 @@ while getopts "t:h:p:d:U:W:r:w:R:I:" opt; do
         d) DB_NAME="$OPTARG" ;;
         U) DB_USER="$OPTARG" ;;
         W) DB_PASS="$OPTARG" ;;
+        V) VERBOSE=1 ;;
         r) ROW_COUNT="$OPTARG" ;;
         w) DATA_WIDTH="$OPTARG" ;;
         R) UPDATE_ROUNDS="$OPTARG" ;;
@@ -215,7 +226,8 @@ log_step "2/6: Checking UStore configuration"
 ENABLE_USTORE=$(db_query "SELECT setting FROM pg_settings WHERE name = 'enable_ustore';" | head -1 | tr -d ' ')
 if [ "$ENABLE_USTORE" != "on" ]; then
     log_warn "enable_ustore='$ENABLE_USTORE', setting to 'on'..."
-    db_exec "ALTER SYSTEM SET enable_ustore = on; SELECT pg_reload_conf();"
+    db_exec "ALTER SYSTEM SET enable_ustore = on;"
+    db_exec "SELECT pg_reload_conf();"
     sleep 2
 fi
 log_info "  enable_ustore = on"

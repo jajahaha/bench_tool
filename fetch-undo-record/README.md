@@ -30,6 +30,7 @@ Ustore 引擎采用 undo-based MVCC，每次 UPDATE 产生一条 undo record，�
 | -d DB | 数据库名 | postgres |
 | -U USER | 用户 | root(gaussdb) / gaussdb(opengauss) |
 | -W PASS | 密码 | - |
+| -V | 打印执行的每条 SQL（调试模式） | off |
 | -r ROWS | 行数 | 20000 |
 | -w WIDTH | 每行数据宽度(字节) | 3000 |
 | -R ROUNDS | 长事务 UPDATE 轮次 | 35 |
