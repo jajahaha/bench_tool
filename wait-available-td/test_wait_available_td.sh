@@ -247,40 +247,34 @@ log_info "  enable_ustore = on"
 # ── Phase 0: Setup — STORAGE PLAIN + fill page ──
 log_step "Phase 0: Setup — Create Ustore table (STORAGE PLAIN) and fill page"
 
-# Strategy: STORAGE PLAIN with large data to pack ~5 rows per page,
-# then UPDATE to grow data and consume remaining free space.
-# When page free space ≈ 0, TD expansion fails → "wait available td"
+# Strategy: INSERT directly with large data (not short→UPDATE grow),
+# because UPDATE to grow data causes row migration on GaussDB (rows leave page 0).
+# STORAGE PLAIN + 1540-byte data packs ~5 rows per page, minimal free space.
 db_exec "DROP TABLE IF EXISTS ${TABLE_NAME} CASCADE;"
 db_exec "CREATE TABLE ${TABLE_NAME} (id INT PRIMARY KEY, val INT, data VARCHAR(2000)) WITH (STORAGE_TYPE = USTORE, FILLFACTOR = 100);"
 db_exec "ALTER TABLE ${TABLE_NAME} ALTER COLUMN data SET STORAGE PLAIN;"
 
-# Insert 8 rows with short data (all on page 0, lots of free space)
-db_exec "INSERT INTO ${TABLE_NAME} SELECT g, 0, 'x' FROM generate_series(1, 8) g;"
+# Insert rows directly with large data — rows stay on their assigned pages
+db_exec "INSERT INTO ${TABLE_NAME} SELECT g, 0, repeat('x', 1540) FROM generate_series(1, 30) g;"
+db_exec "VACUUM ANALYZE ${TABLE_NAME};"
 
-echo "  Before page fill:"
-ROW_IDS_STR=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} ORDER BY ctid LIMIT 8) s;")
-IFS=',' read -ra IDS <<< "$ROW_IDS_STR"
-CTID_BEFORE=$(db_query "SELECT id, ctid FROM ${TABLE_NAME} WHERE id <= 8 ORDER BY id;")
-echo "$CTID_BEFORE" | while read line; do echo "    $line"; done
+ROW_COUNT=$(db_query "SELECT count(*) FROM ${TABLE_NAME};" | head -1 | tr -d ' ')
+log_info "  Inserted $ROW_COUNT rows"
 
-# Now UPDATE to grow data — consume free space on page 0
-# Grow rows 1-8 from 'x' (~1 byte) to ~1540 bytes each
-# This should fill page 0 nearly completely (5 rows × ~1560 ≈ 7800 + overhead)
-db_exec "UPDATE ${TABLE_NAME} SET data = repeat('x', 1540) WHERE id <= 8;"
-
-echo "  After page fill (data grown to 1540 bytes):"
-CTID_AFTER=$(db_query "SELECT id, ctid, length(data) FROM ${TABLE_NAME} WHERE id <= 8 ORDER BY id;")
-echo "$CTID_AFTER" | while read line; do echo "    $line"; done
-
-# Check which rows are still on page 0
-PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM ${TABLE_NAME} WHERE substring(ctid::text from '^\((\d+)') = '0';")
+# Find rows on page 0 via ctid
+PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} WHERE substring(ctid::text from '^\((\d+)') = '0' ORDER BY ctid LIMIT 8) s;")
 if [ -z "$PAGE0_IDS" ]; then
-    log_error "No rows on page 0 after UPDATE. Test cannot proceed."
+    log_error "No rows on page 0. Test cannot proceed."
     db_exec "DROP TABLE IF EXISTS ${TABLE_NAME} CASCADE;"
     exit 1
 fi
-PAGE0_COUNT=$(echo "$PAGE0_IDS" | tr ',' '\n' | wc -l)
-log_info "  Rows on page 0: $PAGE0_COUNT (ids: $PAGE0_IDS)"
+IFS=',' read -ra IDS <<< "$PAGE0_IDS"
+PAGE0_COUNT=${#IDS[@]}
+
+CTID_INFO=$(db_query "SELECT id, ctid FROM ${TABLE_NAME} WHERE id IN (${PAGE0_IDS}) ORDER BY ctid;")
+echo "  Rows on page 0 ($PAGE0_COUNT rows):"
+echo "$CTID_INFO" | while read line; do echo "    $line"; done
+log_info "  Target rows for test: ${IDS[*]} (${PAGE0_COUNT} rows on page 0)"
 
 # Re-select IDS from page 0 rows only
 IFS=',' read -ra IDS <<< "$PAGE0_IDS"
