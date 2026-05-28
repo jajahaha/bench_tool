@@ -135,7 +135,9 @@ db_exec() {
     local err_file="/tmp/watd_exec_err_$$_${caller_line}"
     eval "$(build_conn "-q -c \"$sql\"")" > /dev/null 2>"$err_file"
     if [ -s "$err_file" ]; then
-        local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^ALTER\|^SET\|^pg_reload\|^DO\|^gsql:" "$err_file" 2>/dev/null)
+        # Keep real errors (FATAL, ERROR, connection failure), remove only benign noise
+        local err_msg=$(grep -E "^(FATAL|ERROR|gsql:\s*(FATAL|ERROR|could not|connection)|psql:)" "$err_file" 2>/dev/null || true)
+        local noise=$(grep -E "^(Password|NOTICE|ALTER|SET|pg_reload|DO|You)" "$err_file" 2>/dev/null || true)
         if [ -n "$err_msg" ]; then
             log_sql_err "db_exec" "$caller_line" "$err_msg" "$sql"
         fi
@@ -152,13 +154,15 @@ db_query() {
     local err_file="/tmp/watd_query_err_$$_${caller_line}"
     eval "$(build_conn "-t -A -c \"$sql\"")" > "$out_file" 2>"$err_file"
     if [ -s "$err_file" ]; then
-        local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^gsql:" "$err_file" 2>/dev/null)
+        # Keep real errors, remove only benign noise
+        local err_msg=$(grep -E "^(FATAL|ERROR|gsql:\s*(FATAL|ERROR|could not|connection)|psql:)" "$err_file" 2>/dev/null || true)
         if [ -n "$err_msg" ]; then
             log_sql_err "db_query" "$caller_line" "$err_msg" "$sql"
         fi
     fi
     rm -f "$err_file"
-    cat "$out_file" | grep -v "^Password\|^You\|^Line\|^gsql:\|^gaussdb\|^$\|^NOTICE\|^WARNING\|^ALTER\|^SET\|^DROP\|^CREATE\|^INSERT\|^VACUUM\|^DO\|^HINT\|^DETAIL\|^CONTEXT\|^timestamp\|^Time\|^Format\|^Server"
+    # Filter stdout: remove noise, keep data + real error lines
+    cat "$out_file" | grep -v "^Password\|^You\|^Line\|^gaussdb=\|^$\|^NOTICE:\|^WARNING:\|^HINT:\|^DETAIL:\|^CONTEXT:\|^ALTER\|^SET\|^DROP\|^CREATE\|^INSERT\|^VACUUM\|^DO\|^timestamp\|^Time\|^Format\|^Server"
     rm -f "$out_file"
 }
 
@@ -177,6 +181,26 @@ detect_wait_view() {
     else
         WAIT_VIEW="pg_stat_activity"
     fi
+}
+
+# ── Test database connectivity ──
+test_connection() {
+    log_step "Test database connectivity"
+    local test_out=$(db_query "SELECT 1;" 2>&1)
+    local result=$(echo "$test_out" | grep -E '^[0-9]+$' | head -1)
+    if [ "$result" != "1" ]; then
+        log_error "Database connection failed!"
+        echo "  Connection: $DB_TYPE $DB_HOST:$DB_PORT/$DB_NAME as $DB_USER"
+        echo "  Client:     $DB_CLIENT"
+        if [ "$DB_CLIENT" = "gsql" ]; then
+            echo "  Try:  gsql -h $DB_HOST -p $DB_PORT -U $DB_USER -W '<password>' -d $DB_NAME -c 'SELECT 1;'"
+        else
+            echo "  Try:  PGPASSWORD='<password>' psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c 'SELECT 1;'"
+        fi
+        echo "  Raw output: $test_out"
+        exit 1
+    fi
+    log_info "  Connection OK"
 }
 
 setup_table() {
@@ -265,6 +289,9 @@ echo "Hold TD secs:    $HOLD_SECS"
 echo "Max concurrency: $MAX_CONCURRENCY"
 echo "============================================================"
 echo ""
+
+# ── Connection test ──
+test_connection
 
 # ── Pre-check ──
 log_step "Pre-check: Database version and key parameters"
