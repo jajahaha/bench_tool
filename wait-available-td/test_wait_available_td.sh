@@ -189,9 +189,16 @@ setup_table() {
     local row_count=$(db_query "SELECT count(*) FROM ${TABLE_NAME};" | head -1 | tr -d ' ')
     log_info "  Inserted $row_count rows"
 
-    PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} WHERE substring(ctid::text from '^\((\d+)') = '0' ORDER BY ctid LIMIT 8) s;")
+    PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} WHERE ctid::text LIKE '(0,%' ORDER BY ctid LIMIT 8) s;")
     if [ -z "$PAGE0_IDS" ]; then
-        log_error "No rows on page 0. Test cannot proceed."
+        log_error "No rows on page 0. Diagnostic:"
+        diag=$(db_query "SELECT id, ctid FROM ${TABLE_NAME} ORDER BY id LIMIT 10;" 2>/dev/null)
+        if [ -n "$diag" ]; then
+            echo "  First 10 rows (id, ctid):"
+            echo "$diag" | while read line; do echo "    $line"; done
+        else
+            echo "  Table may be empty or ctid format differs"
+        fi
         db_exec "DROP TABLE IF EXISTS ${TABLE_NAME} CASCADE;"
         exit 1
     fi
