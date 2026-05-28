@@ -64,21 +64,21 @@ Astore 无此问题: 每行独立 xmin/xmax, 死锁只影响参与事务
 | -W PASS | 密码 | - |
 | -T TABLE | 表名 | td_test |
 | -V | verbose：打印每条 SQL | 关闭 |
-| -H SECS | Phase 1 TD 持有时间(秒) | 30 |
+| -H SECS | Phase 1 TD 持有时间(秒) | 15 |
 | -D SECS | Phase 2 死锁检测超时(秒) | 15 |
 
 ## 测试流程
 
-### Phase 1: TD contention
+### Phase 1: TD contention（页面填满策略）
 
-1. 创建 Ustore 表 (200 行，小宽度确保同页聚集)
-2. 启动 4 个后台事务：各 UPDATE 同页不同行 + pg_sleep(HOLD_SECS) → 占满初始 4 个 TD
-3. 第 5 个事务 UPDATE 同页另一行 → TD 动态扩展分配新 TD
-4. 监测 "wait available td" 等待事件（仅在页面空闲空间耗尽时出现）
-5. 若 FG5 快速完成 → TD 扩展成功；若 FG5 等待 → TD 扩展失败
+1. 创建 Ustore 表（STORAGE PLAIN + FILLFACTOR=100 + VARCHAR(2000) data 列）
+2. INSERT 8 行短数据（同页聚集）→ UPDATE data 增大到 1540 字节消耗页面空闲空间
+3. 检测 page 0 保留的行数（通常 5 行），剩余空闲空间极少
+4. 启动 4 个后台事务 UPDATE page 0 行 + pg_sleep(HOLD_SECS) → 占满初始 4 TD
+5. 第 5 个事务 UPDATE 同页另一行 → TD 扩展需要空闲空间 → 若空间不足则 "wait available td"
+6. 若 FG 快速完成 → TD 扩展成功（页面仍有微量空闲空间）
 
-**实测结论 (OpenGauss 6.0)：** TD 扩展非常高效，即使 100+ 并发事务也能通过扩展获取 TD。
-"wait available td" 需要页面空闲空间耗尽的极端场景才能复现。
+**实测结论 (OpenGauss 6.0)：** 即使 STORAGE PLAIN + 1540字节大行宽，页面仍有 ~170 字节空闲空间支持 TD 扩展。GaussDB 可能表现不同（TD 扩展机制可能有限制），建议在 GaussDB 上实测。
 
 ### Phase 2: Deadlock（已验证可复现）
 
