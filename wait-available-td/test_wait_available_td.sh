@@ -79,6 +79,11 @@ log_step()  { echo -e "${BLUE}[STEP]${NC} $1"; }
 log_sql() {
     [ "$VERBOSE" -eq 1 ] && echo -e "${CYAN}[SQL]${NC} $1" >&2
 }
+log_sql_err() {
+    local caller_fn="$1" caller_line="$2" err_msg="$3" sql="$4"
+    echo -e "${RED}[SQL ERROR]${NC} ${caller_fn}() line ${caller_line}: ${err_msg}"
+    echo -e "${RED}[SQL]${NC} ${sql}"
+}
 
 url_encode() {
     printf '%s' "$1" | sed 's/@/%40/g; s/:/%3A/g; s/\//%2F/g; s/#/%23/g; s/\?/%3F/g; s/&/%26/g; s/=/%3D/g; s/ /%20/g'
@@ -126,15 +131,15 @@ build_conn() {
 
 db_exec() {
     local sql="$1"
+    local caller_fn="${FUNCNAME[1]}"
     local caller_line="${BASH_LINENO[0]}"
-    log_sql "$sql"
+    log_sql "db_exec (line $caller_line): $sql"
     local err_file="/tmp/watd_exec_err_$$_${caller_line}"
     eval "$(build_conn "-q -c \"$sql\"")" > /dev/null 2>"$err_file"
     if [ -s "$err_file" ]; then
         local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^ALTER\|^SET\|^pg_reload\|^DO\|^gsql:" "$err_file" 2>/dev/null)
         if [ -n "$err_msg" ]; then
-            log_error "db_exec (line $caller_line): $err_msg"
-            echo -e "${RED}[SQL]${NC} $sql" >&2
+            log_sql_err "db_exec" "$caller_line" "$err_msg" "$sql"
         fi
     fi
     rm -f "$err_file"
@@ -142,16 +147,16 @@ db_exec() {
 
 db_query() {
     local sql="$1"
+    local caller_fn="${FUNCNAME[1]}"
     local caller_line="${BASH_LINENO[0]}"
-    log_sql "$sql"
+    log_sql "db_query (line $caller_line): $sql"
     local out_file="/tmp/watd_query_out_$$_${caller_line}"
     local err_file="/tmp/watd_query_err_$$_${caller_line}"
     eval "$(build_conn "-t -A -c \"$sql\"")" > "$out_file" 2>"$err_file"
     if [ -s "$err_file" ]; then
         local err_msg=$(grep -v "^Password\|^You\|^NOTICE\|^gsql:" "$err_file" 2>/dev/null)
         if [ -n "$err_msg" ]; then
-            log_error "db_query (line $caller_line): $err_msg"
-            echo -e "${RED}[SQL]${NC} $sql" >&2
+            log_sql_err "db_query" "$caller_line" "$err_msg" "$sql"
         fi
     fi
     rm -f "$err_file"
@@ -161,7 +166,8 @@ db_query() {
 
 bg_sql() {
     local sql="$1" tag="$2"
-    log_sql "bg-$tag: $sql"
+    local caller_line="${BASH_LINENO[0]}"
+    log_sql "bg_sql (line $caller_line): bg-$tag: $sql"
     eval "$(build_conn "-c \"$sql\"")" >"/tmp/watd_${tag}.out" 2>"/tmp/watd_${tag}.err" &
     echo $!
 }
