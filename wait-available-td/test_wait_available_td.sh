@@ -158,7 +158,7 @@ db_query() {
         fi
     fi
     rm -f "$err_file"
-    cat "$out_file" | grep -v "^Password\|^You\|^Line\|^gsql:"
+    cat "$out_file" | grep -v "^Password\|^You\|^Line\|^gsql:\|^gaussdb\|^$\|^NOTICE\|^WARNING\|^ALTER\|^SET\|^DROP\|^CREATE\|^INSERT\|^VACUUM\|^DO\|^HINT\|^DETAIL\|^CONTEXT\|^timestamp\|^Time\|^Format\|^Server"
     rm -f "$out_file"
 }
 
@@ -186,10 +186,10 @@ setup_table() {
     db_exec "INSERT INTO ${TABLE_NAME} SELECT g, 0, repeat('x', 1540) FROM generate_series(1, 30) g;"
     db_exec "VACUUM ANALYZE ${TABLE_NAME};"
 
-    local row_count=$(db_query "SELECT count(*) FROM ${TABLE_NAME};" | head -1 | tr -d ' ')
+    local row_count=$(db_query "SELECT count(*) FROM ${TABLE_NAME};" | grep -E '^[0-9]+$' | head -1 | tr -d ' ')
     log_info "  Inserted $row_count rows"
 
-    PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} WHERE ctid::text LIKE '(0,%' ORDER BY ctid LIMIT 8) s;")
+    PAGE0_IDS=$(db_query "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT id FROM ${TABLE_NAME} WHERE ctid::text LIKE '(0,%' ORDER BY ctid LIMIT 8) s;" | grep -E '^[0-9,]+$' | head -1 | tr -d ' ')
     if [ -z "$PAGE0_IDS" ]; then
         log_error "No rows on page 0. Diagnostic:"
         diag=$(db_query "SELECT id, ctid FROM ${TABLE_NAME} ORDER BY id LIMIT 10;" 2>/dev/null)
