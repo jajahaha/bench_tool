@@ -1,5 +1,16 @@
 # db_shell_bench Release Note
 
+## v6 (2026-05-28)
+
+### 新增功能
+
+- **Ustore TD contention 与死锁复现** — 新增 wait-available-td 目录，端到端复现 OpenGauss/GaussDB Ustore Transaction Directory (TD) 槽位争用和死锁
+  - Ustore 将事务信息从 tuple 级移到 page 级 TD，默认每页 4 个 TD 槽位（可动态扩展）
+  - Phase 1: 并发事务占满 TD → 检测 TD 动态扩展或 "wait available td" 等待事件
+  - Phase 2: 交叉 UPDATE 同页行 → 行锁循环等待 → 死锁（已验证复现）
+  - 动态探测 pg_thread_wait_status / pg_stat_activity 列结构兼容跨版本
+  - 实测结论：OpenGauss 6.0 TD 扩展高效，"wait available td" 需页面空闲空间耗尽的极端场景
+
 ## v5 (2026-05-28)
 
 ### 变更
