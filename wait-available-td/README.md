@@ -1,6 +1,6 @@
-# wait-available-td — Ustore TD 等待与死锁复现
+# wait-available-td — Ustore TD 递增并发退化测试
 
-OpenGauss/GaussDB Ustore Transaction Directory (TD) 等待事件与死锁复现测试。
+OpenGauss/GaussDB Ustore Transaction Directory (TD) 递增并发退化测试。
 
 ## 原理
 
@@ -17,27 +17,38 @@ Ustore 将 Astore 中每行 tuple 上的事务信息 (xmin/xmax) 统一移到页
 OpenGauss 6.0+ 支持 TD 动态扩展：当 4 个 TD 槽位不够时，从页面空闲空间分配更多 TD。
 **"wait available td" 只在页面空闲空间耗尽、TD 扩展失败时出现**。
 
-因此 "wait available td" 在正常条件下较难复现，需要页面几乎完全填满（无空闲空间供 TD 扩展）。
+### 行锁级联阻塞机制
 
-### 死锁 + TD 页面级饥饿
+STORAGE PLAIN + 大行宽 → 页面空闲空间极小 → TD 扩展受限。
 
-TD 的引入使死锁影响范围扩大：
-
-| | Astore | Ustore (TD) |
-|---|---|---|
-| 同页行锁死锁影响 | 仅参与事务 | 参与事务 + **该页所有新事务** |
-| 原因 | 每行独立事务信息 | 死锁事务占满 TD → 新事务无法获取 TD → 页面级饥饿 |
+FG 与部分 BG 共享同页同页同行（IDS[0]），形成行锁级联队列：
 
 ```
-死锁场景:
-T1 (占 TD0): UPDATE row_A → UPDATE row_B → 等待 T2 行锁
-T2 (占 TD1): UPDATE row_B → UPDATE row_A → 等待 T1 行锁
-→ 互相等待 → 死锁 (deadlock detector 中止其中一个)
+级联阻塞示意（HOLD_SECS=5, 5 个 BG row = 1 2 3 4 5）：
 
-TD 饥饿:
-死锁事务 T1, T2 占 TD → T3, T4, T5 在同页新事务 → 无 TD → 页面级停滞
-Astore 无此问题: 每行独立 xmin/xmax, 死锁只影响参与事务
+BG0 → UPDATE id=1 (IDS[0], 与 FG 共享) → pg_sleep(5) → COMMIT
+BG1 → UPDATE id=2 → pg_sleep(5) → COMMIT
+BG2 → UPDATE id=3 → pg_sleep(5) → COMMIT
+BG3 → UPDATE id=4 → pg_sleep(5) → COMMIT
+BG4 → UPDATE id=5 → pg_sleep(5) → COMMIT
+BG5 → UPDATE id=1 (与 FG 共享) → 等行锁 → 拿锁 → pg_sleep(5) → COMMIT
+
+FG → UPDATE id=1 → 等行锁 → BG0 释放 → BG5 拿锁 → FG 继续等 → BG5 释放 → FG 拿锁
+FG 总耗时 ≈ 2 × HOLD_SECS = 10s
+
+每 5 个 BG 有一波级联（BG0, BG5, BG10... 在 IDS[0] 上排队），
+波数 = floor(并发数 / 页面行数) + 1
+FG 延迟 ≈ 波数 × HOLD_SECS
 ```
+
+实测退化曲线（OpenGauss 6.0, HOLD_SECS=5）：
+
+| 并发数 | 级联波数 | FG 耗时 | 退化倍数 |
+|--------|----------|---------|---------|
+| 0      | 0        | ~1s     | 基线    |
+| 1-5    | 1        | ~5s     | 5x      |
+| 6-10   | 2        | ~10s    | 10x     |
+| 11+    | 3        | ~15s    | 15x     |
 
 ## 快速开始
 
@@ -48,8 +59,8 @@ Astore 无此问题: 每行独立 xmin/xmax, 死锁只影响参与事务
 # GaussDB
 ./test_wait_available_td.sh -t gaussdb -h localhost -p 8000 -U root -W 'Pass@123'
 
-# verbose 模式
-./test_wait_available_td.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -V
+# 自定义并发和持有时间
+./test_wait_available_td.sh -t opengauss -h localhost -p 5433 -U gaussdb -W 'Enmotech@123' -H 10 -C 16 -V
 ```
 
 ## 参数
@@ -64,30 +75,38 @@ Astore 无此问题: 每行独立 xmin/xmax, 死锁只影响参与事务
 | -W PASS | 密码 | - |
 | -T TABLE | 表名 | td_test |
 | -V | verbose：打印每条 SQL | 关闭 |
-| -H SECS | Phase 1 TD 持有时间(秒) | 15 |
-| -D SECS | Phase 2 死锁检测超时(秒) | 15 |
+| -H SECS | BG 事务持有行锁秒数 | 5 |
+| -C N | 最大并发数（测试轮次 0~N） | 12 |
 
 ## 测试流程
 
-### Phase 1: TD contention（页面填满策略）
+每轮递增并发（0 到 MAX_CONCURRENCY），每轮重建表保证条件一致：
 
-1. 创建 Ustore 表（STORAGE PLAIN + FILLFACTOR=100 + VARCHAR(2000) data 列）
-2. INSERT 8 行短数据（同页聚集）→ UPDATE data 增大到 1540 字节消耗页面空闲空间
-3. 检测 page 0 保留的行数（通常 5 行），剩余空闲空间极少
-4. 启动 4 个后台事务 UPDATE page 0 行 + pg_sleep(HOLD_SECS) → 占满初始 4 TD
-5. 第 5 个事务 UPDATE 同页另一行 → TD 扩展需要空闲空间 → 若空间不足则 "wait available td"
-6. 若 FG 快速完成 → TD 扩展成功（页面仍有微量空闲空间）
+1. **建表**：Ustore + STORAGE PLAIN + FILLFACTOR=100 + VARCHAR(2000) 1540 字节 data
+2. **找 page 0 行**：通过 ctid 定位同页行（约 5 行/页）
+3. **行锁级联**：FG 与 BG 共享 IDS[0]，BG 每 5 个一波共享 IDS[0]
+4. **Round N**：启动 N 个 BG（UPDATE + pg_sleep(HOLD_SECS)) → 等 BG settle → 启动 FG（UPDATE IDS[0]) → 测量 FG 耗时 + 监控 "wait available td"
+5. **每轮重建表**：清除前轮 TD 扩展残留
 
-**实测结论 (OpenGauss 6.0)：** 即使 STORAGE PLAIN + 1540字节大行宽，页面仍有 ~170 字节空闲空间支持 TD 扩展。GaussDB 可能表现不同（TD 扩展机制可能有限制），建议在 GaussDB 上实测。
+## 输出解读
 
-### Phase 2: Deadlock（已验证可复现）
+退化报告示例：
 
-1. T1: BEGIN → UPDATE row_A → pg_sleep(3) → UPDATE row_B
-2. T2: BEGIN → UPDATE row_B → pg_sleep(3) → UPDATE row_A
-3. T1 持有 row_A 行锁，等待 T2 的 row_B 行锁
-4. T2 持有 row_B 行锁，等待 T1 的 row_A 行锁
-5. 死锁！deadlock detector 中止其中一个事务
-6. 死锁事务占住 TD → 同页新事务无法获取 TD → 页面级饥饿
+```
+  BG#  | FG Elapsed   | Casc# | wait avail td     | Max TD #
+  ---- | ----------   | ------ | ---------------    | ----------
+  0    | 1.023s       | 0      | NO                 | 0
+  1    | 5.103s       | 1      | NO                 | 0
+  5    | 5.100s       | 1      | NO                 | 0
+  6    | 10.187s      | 2      | NO                 | 0
+  10   | 10.192s      | 2      | NO                 | 0
+  11   | 15.271s      | 3      | NO                 | 0
+  12   | 15.282s      | 3      | NO                 | 0
+```
+
+- **Casc#**：级联波数（IDS[0] 上的排队 BG 数）
+- **wait avail td**：是否观测到 "wait available td" 等待事件
+- 退化里程碑：1s / 5s / 10s 阈值首次出现的轮次
 
 ## 客户端自动选择
 
@@ -95,11 +114,14 @@ opengauss/gaussdb 类型自动检测客户端：
 - 有 gsql 时使用 gsql
 - 否则使用 psql（兼容 PostgreSQL 协议）
 
-## 输出解读
+## 关于 "wait available td"
 
-- Deadlock `REPRODUCED ✓` — 成功复现同页行锁死锁
-- "wait available td" `NOT REPRODUCED ✗` / `TD expansion succeeded` — 页面有足够空闲空间支持 TD 动态扩展
-- 要复现 "wait available td"：需创建大行宽 (STORAGE PLAIN) 表使页面几乎满载，令 TD 扩展无空间
+OpenGauss 6.0 的 TD 动态扩展机制较为完善，在页面仍有 ~293 字节空闲空间时可成功扩展 TD。
+因此 "wait available td" 在中等并发下不易出现。退化主要来自行锁级联阻塞。
+
+如需观测 "wait available td"：
+- 增大并发至 TD 扩展耗尽空闲空间（约 13+ 并发）
+- 在 GaussDB 上测试（TD 扩展机制可能更受限）
 
 ## 许可证
 

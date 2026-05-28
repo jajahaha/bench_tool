@@ -11,7 +11,7 @@
 | snapshot too old | [snapshot-too-old/](snapshot-too-old/) | 复现 OpenGauss/GaussDB UStore undo 回收导致的快照损坏 |
 | fetch undo record | [fetch-undo-record/](fetch-undo-record/) | 复现 UStore undo chain 遍历导致的查询性能退化 |
 | 执行计划跳变 | [plan-jump/](plan-jump/) | PostgreSQL / OpenGauss 执行计划跳变应急 SOP |
-| wait available td | [wait-available-td/](wait-available-td/) | 复现 UStore TD 槽位不足导致的等待事件与死锁 |
+| wait available td | [wait-available-td/](wait-available-td/) | 复现 Ustore TD 槽位不足导致的行锁级联阻塞与 SQL 退化（ms→10s+） |
 
 各功能的使用说明、参数、原理详见各自目录下的 README。
 
